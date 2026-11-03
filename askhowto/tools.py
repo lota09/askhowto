@@ -2,6 +2,7 @@
 
 - search_docs(query): 서버 자료 + 위키 색인 검색. 한국어 이름은 사전으로 영어 이름도 같이 찾는다.
 - read_page(title, section): 위키 문서 한 섹션 읽기 (섹션을 비우면 섹션 목록과 첫 부분).
+- get_item(name): 아이템 하나의 정보 전부(설명, 구매·획득처, 전리품 드롭, 만드는 법, 쓰임새, 같은 계열).
 개념은 docs/design/rag-concepts.md 4장.
 """
 import json
@@ -28,7 +29,15 @@ SPECS = [
             "title": {"type": "string", "description": "위키 문서 제목 (영어, 예: Fish Pond) 또는 한국어 이름"},
             "section": {"type": "string", "description": "섹션 제목 (예: Mechanics). 모르면 빈 문자열"}},
             "required": ["title"]}}},
+    {"type": "function", "function": {
+        "name": "get_item",
+        "description": "아이템·블록 하나의 정보를 모두 가져온다: 설명, 상점 구매처, 몹·블록 드롭과 상자 전리품, 이 서버의 실제 제작법, "
+                       "재료로 쓰이는 곳, 같은 계열(다른 등급). 한국어·영어 이름 모두 되고 오타도 어느 정도 맞춘다.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "아이템 이름 (예: 물뿌리개, Lockbox, 금 대장장이 형판)"}},
+            "required": ["name"]}}},
 ]
+
 
 _pages = None
 
@@ -89,6 +98,29 @@ def read_page(index, title, section=""):
     return (f"### 위키 {page}\n섹션 목록: {', '.join(names)}\n\n" + "\n".join(lines))[:MAX_RESULT_CHARS]
 
 
+def get_item(index, name):
+    """이름 하나에 대한 확정 정보 전부. 이름 매칭(오타 허용)으로 찾고, 제작법 카드는 모든 의도로 만든다."""
+    pinned, extras = index.match_names(name)
+    if not pinned and not extras:
+        return f"'{name}'이라는 아이템을 찾지 못했다. 다른 이름(영어 이름 등)이나 search_docs로 찾아본다."
+    out, used = [], 0
+    blocks = [f"### {c['title']}\n{c['text']}" for c in pinned if c["source"] not in ("wiki", "senses")]
+    blocks += [f"### {c['title']}\n{c['text']}" for c in pinned if c["source"] == "senses"]
+    blocks += [rag.entity_card(e) for e in extras]
+    first = (pinned[0].get("names") or [""])[0] if pinned else (extras[0].get("ko") or extras[0].get("en") or extras[0]["alias"])
+    key = re.sub(r"\s+", "", first.lower())
+    card = index.recipe_card(key, "만드는 법 쓰임새 종류") if key else None
+    if card and card["text"] not in "\n".join(blocks):
+        blocks.append(f"### {card['title']}\n{card['text']}")
+    blocks += [f"### {c['title']}\n{c['text']}" for c in pinned if c["source"] == "wiki"]
+    for block in blocks:
+        if used + len(block) > MAX_RESULT_CHARS:
+            break
+        out.append(block)
+        used += len(block)
+    return "\n\n".join(out)
+
+
 def run(index, name, arguments, seen=()):
     """도구 호출 하나 실행 -> 결과 문자열. 인자가 깨졌거나 모르는 도구면 그 사실을 문자열로 돌려준다."""
     try:
@@ -99,4 +131,6 @@ def run(index, name, arguments, seen=()):
         return search_docs(index, str(args.get("query", "")), seen)
     if name == "read_page":
         return read_page(index, str(args.get("title", "")), str(args.get("section", "")))
+    if name == "get_item":
+        return get_item(index, str(args.get("name", "")))
     return f"모르는 도구: {name}"

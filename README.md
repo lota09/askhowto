@@ -120,8 +120,11 @@
   질문에 "지금/현재/여기" 같은 말이 있으면 계절·바이옴 이름도 검색어에 더한다.
 - **팀 공유** (KubeJS만): 답이 오면 같은 FTB Teams 파티(혼자인 개인 팀 제외), 없으면 스코어보드 팀의 접속 중인 팀원에게 "OO님의 질문: …"과 같은 답을 보낸다.
   평가 버튼은 질문한 사람만 받는다. `/askteam on|off`로 받기를 끈다(플레이어 데이터에 저장).
-- **도구** (`tools.py`, `config.PROVIDERS[...]["tools"]`): NIM·Gemini는 `search_docs`(서버 자료+위키 검색), `read_page`(위키 섹션 읽기)를 쓸 수 있다.
-  [자료]로 부족할 때만 쓰게 하고, 질문당 2번·30초까지다. '모른다'고 답하기 전에는 한 번 찾게 한다(`bot.MAX_TOOL_CALLS`, `TOOL_BUDGET_SECONDS`). 호출은 `worker.log`의 `tool:` 줄과 `qa.jsonl`의 `tools`에 남는다.
+- **LLM 호출 최대 2번** (`bot.call_with_tools`, 도구를 쓰는 NIM·Gemini): 분류 호출 없이
+  1. 검색 자료로 답한다. 모자라면 모델이 도구를 요청한다: `search_docs`(서버 자료+위키 검색), `read_page`(위키 섹션), `get_item`(아이템 하나의 설명·구매처·드롭·제작법·쓰임새·같은 계열).
+  2. 도구 결과로 답한다. 모델이 도구 없이 '모른다'고 답했으면 사이드카가 질문 속 대상마다 `get_item`과 이름을 붙인 `search_docs`를 대신 돌려 넣고 다시 답하게 한다.
+  웹 검색은 넣지 않았다(무료 Gemini 구글 검색은 막혀 있고, 일반 검색은 API 키가 필요. 11/03 사용자 결정으로 2단계까지만).
+  로컬 Gemma는 도구 없이 분류 + 답 2번. 호출 기록은 `worker.log`의 `tool:` 줄과 `qa.jsonl`의 `tools`.
 - **공식 위키** (`wiki.py`): https://sunlitvalley.miraheze.org (영어, CC BY-SA 4.0) 일반 문서 129개를 영어 원문 그대로 섹션 조각으로 넣는다.
   - 넘겨주기, Cobblemon(같은 위키의 다른 팩), 운영 문서, 10만 자 넘는 표 문서는 뺀다.
   - 제목은 lang 파일과 아이템 ID 별칭으로 한국어 이름에 잇는다(106개).
@@ -130,7 +133,12 @@
     서버 자료와 같은 대상임을 모델이 알고, 한국어 검색에도 걸린다.
   - 위키는 팩 버전이 다를 수 있어 서버 자료가 우선이다(예: 리빗 오두막 수확 시각, 위키 8시 / 서버 7시).
   - 갱신: `python3 -m askhowto wiki` 다음 `build`.
-- **평가 도구**: `tests/eval.py`(93문항), `tests/tools_eval.py`(도구 있음/없음 비교 6문항), `tests/e2e.py`(시나리오).
+- **전리품 드롭** (`gamedata.loot_sources`): 모드 jar의 전리품 테이블(몹·블록 드롭, 구조물 상자, 낚시)을 아이템별 "전리품으로 얻기"로.
+  KubeJS(server_scripts/loot)가 바꾼 것은 반영 안 됨. 블록이 자기 자신을 떨어뜨리는 경우는 뺀다.
+- **마법부여대 문자 대사**: 노움처럼 SGA로 말하는 NPC 대사를 영어로 풀어 넣는다(`build_docs.decode_sga`).
+- **채팅 표시** (KubeJS): 답에 나온 아이템 이름은 하늘색으로, 마우스를 올리면 실제 아이템 툴팁(`show_item`). 넣어 준 자료 중 답에 안 쓴 것은 "(답에 안 쓴 관련 자료: …)".
+  비슷한 모드 조사(docs/design/related-projects-2026-11.md)에서 가져온 것.
+- **평가 도구**: `tests/eval.py`(93문항), `tests/tools_eval.py`(도구 있음/없음 비교 6문항), `tests/e2e.py`(시나리오), `tests/replay_local.py`([도움됨] 질문을 다른 모델로 다시 답하기).
   조합법 문항은 서버가 덤프한 레시피로 돌린다(`ASKHOWTO_RECIPES_FILE=runs/model-compare/recipes_real.json`).
 
 ## 거절 규칙

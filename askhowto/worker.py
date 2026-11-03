@@ -103,6 +103,10 @@ def handle(path, req, queue_left):
         # notices: 실패 안내 전체(진행 파일로 이미 보여준 것은 KubeJS가 건너뛴다). notice는 예전 KubeJS용 한 줄 요약.
         "notices": "\n".join(res.get("notices", [])),
         "notice": res.get("notice", ""), "provider": provider.get("label", ""),
+        # items: 답에 나온 아이템 "표기\tID" 줄들 (KubeJS가 이름에 마우스를 올리면 툴팁이 뜨게 한다)
+        # unused: 넣어 준 자료 중 답에 안 쓴 것의 제목들
+        "items": "\n".join(f"{name}\t{item_id}" for name, item_id in res.get("items", [])),
+        "unused": "\n".join(res.get("unused", [])),
     })
     for t in res.get("tools", []):
         log(f"tool: {t['name']} {str(t['arguments'])[:120]} -> {t['chars']}자")

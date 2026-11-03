@@ -64,7 +64,7 @@ QUERY_EXPANSIONS = {
 # 질문 의도. 이름이 나온 아이템에 제작법·쓰임새·같은 계열 카드를 붙일지 정한다 (모든 질문에 붙이면 작은 모델이 그대로 늘어놓는다).
 MAKE_INTENT_RE = re.compile(r"만들|만드|제작|조합|레시피|크래프|업그레이드|강화|구하|구해|얻|어디서|구매|사려|파는|못\s*만")
 USE_INTENT_RE = re.compile(r"어따|어디에\s*써|어디다|용도|쓰는|쓰임|쓸모|활용|써\?|쓰지")
-FAMILY_INTENT_RE = re.compile(r"업그레이드|강화|버전|등급|종류|단계|상위|하위|티어|더\s*좋은")
+FAMILY_INTENT_RE = re.compile(r"업그레이드|강화|버전|등급|종류|단계|상위|하위|티어|테크|다음\s*(거|것|단계|등급)?|윗\s*단계|최종|더\s*좋은")
 # 같은 계열: 질문 속 이름으로 끝나는 다른 이름('물뿌리개' -> '철 물뿌리개'). 짧은 이름('밀')은 엉뚱한 게 붙어서 뺀다.
 FAMILY_MIN_KEY = 3
 FAMILY_MAX_PREFIX = 6
@@ -375,6 +375,9 @@ class Index:
         if want_make or want_family:
             make = list(dict.fromkeys(l for f in facts for l in f["make"]))[:3]
             lines += [f"만드는 법: {l}" for l in make] or ["만드는 법: 이 서버에서는 조합·가공으로 만들 수 없음"]
+            drops = list(dict.fromkeys(d for f in facts for d in f.get("drops", [])))
+            if drops:
+                lines.append("전리품으로 얻기(모드 기본값): " + ", ".join(drops))
             # 이름 자체는 못 만들어도 같은 계열('구리 물뿌리개' 등)은 만들 수 있으면 그쪽을 함께 보여준다.
             # ('물뿌리개 어떻게 만들어?'의 답이 '만들 수 없음'으로 끝나지 않게)
             if not make and any((self.recipe_facts.get(i) or {}).get("make") for _, ids in members for i in ids):

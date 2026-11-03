@@ -495,3 +495,59 @@ def gamerules():
         return root["Data"]["GameRules"]
     except (OSError, KeyError, ValueError, IndexError):
         return {}
+
+
+LOOT_RE = re.compile(r"data/([^/]+)/loot_tables/(blocks|entities|chests|gameplay)/(.+)\.json$")
+MAX_LOOT_LINES = 6
+
+
+def _loot_items(node):
+    """전리품 테이블 JSON 안의 아이템 ID들 (풀·대체·그룹을 따라 내려간다)."""
+    out = []
+    if isinstance(node, dict):
+        if node.get("type") in ("minecraft:item", "item") and isinstance(node.get("name"), str):
+            out.append(node["name"])
+        for key in ("pools", "entries", "children"):
+            out += [i for child in node.get(key, []) or [] for i in _loot_items(child)]
+    elif isinstance(node, list):
+        out += [i for child in node for i in _loot_items(child)]
+    return out
+
+
+def loot_sources():
+    """아이템 ID -> ['몹 '좀비'가 떨어뜨림', '블록 '석탄 광석'을 캐면 나옴', '구조물 상자(village 등 3곳)', '낚시로 나옴'].
+    모드 jar의 기본 전리품 테이블이라 KubeJS(server_scripts/loot)가 바꾼 것은 반영되지 않는다.
+    블록이 자기 자신을 떨어뜨리는 경우는 뺀다(블록 테이블 1만 개 대부분). 이름 끝만 다른 상자(balloon_chest_blue/_red …)는 묶는다."""
+    found = {}  # 아이템 -> {(종류, 이름): 줄}
+    for _, entry, data in _jar_files(LOOT_RE):
+        ns, kind, path = LOOT_RE.match(entry).groups()
+        table = _load_json(data)
+        if not table:
+            continue
+        source_id = f"{ns}:{path}"
+        for item in set(_loot_items(table)):
+            if kind == "blocks" and item == source_id:
+                continue
+            found.setdefault(item, set()).add((kind, path, source_id))
+    out = {}
+    order = {"entities": 0, "blocks": 1, "gameplay": 2, "chests": 3}
+    for item, sources in found.items():
+        chests = {}
+        lines = []
+        for kind, path, source_id in sorted(sources, key=lambda s: (order[s[0]], s[1])):
+            if kind == "entities":
+                line = f"몹 '{display_name(source_id)}'이(가) 떨어뜨림"
+            elif kind == "blocks":
+                line = f"블록 '{display_name(source_id)}'을(를) 캐면 나옴"
+            elif kind == "gameplay":
+                line = "낚시로 나옴" + (f"({path.split('/', 1)[1]})" if path.startswith("fishing/") else "") \
+                    if path.startswith("fishing") else f"게임플레이 보상({path})"
+            else:
+                chests.setdefault(re.sub(r"[_/][^_/]*$", "", path) or path, []).append(path)
+                continue
+            if line not in lines:
+                lines.append(line)
+        for base, paths in chests.items():
+            lines.append(f"구조물 상자 전리품({paths[0] if len(paths) == 1 else f'{base} 등 {len(paths)}곳'})")
+        out[item] = lines[:MAX_LOOT_LINES]
+    return out

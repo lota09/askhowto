@@ -113,7 +113,8 @@ CASES = [
     ("캐롤라인 우정 선물 뭐 줘?", "GAME"),
 ]
 # '자료에서 찾지 못했어요'(NOTFOUND)도 게임 질문으로 받아들인 것이다.
-SAME = {"NOTFOUND": "GAME"}
+# 도구를 쓰는 클라우드 모델은 분류 호출 없이 답하므로(LLM 최대 2번) 일반 질문도 GAME으로 나온다. 거절만 아니면 맞은 것으로 본다.
+SAME = {"NOTFOUND": "GAME", "OTHER": "GAME"}
 
 
 def main():
@@ -129,7 +130,7 @@ def main():
         else:
             label = "CHAT" if guard.chat_reply(q) else bot.decide(q, *bot.search(q))
             lines, sources = [], []
-        hit = SAME.get(label, label) in (expected if isinstance(expected, tuple) else (expected,))
+        hit = SAME.get(label, label) in [SAME.get(e, e) for e in (expected if isinstance(expected, tuple) else (expected,))]
         ok += hit
         missing = [m for m in must if answer and not any(m in line for line in lines)]
         if answer and must:

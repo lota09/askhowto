@@ -258,6 +258,18 @@ def mostly_hangul(text):
     return letters and sum("가" <= ch <= "힣" for ch in letters) / len(letters) >= 0.5
 
 
+# 마법부여대 문자(Standard Galactic Alphabet)로 쓴 대사(노움 등)를 영어로 푼다. 그대로 두면 한국어가 아니라고 걸러진다.
+SGA = {"ᔑ": "a", "ʖ": "b", "ᓵ": "c", "↸": "d", "ᒷ": "e", "⎓": "f", "⊣": "g", "⍑": "h", "╎": "i", "⋮": "j", "ꖌ": "k",
+       "ꖎ": "l", "ᒲ": "m", "リ": "n", "𝙹": "o", "!¡": "p", "ᑑ": "q", "∷": "r", "ᓭ": "s", "ℸ": "t", "⚍": "u", "⍊": "v",
+       "∴": "w", " ̇/": "x", "||": "y", "ǁ": "y", "⨅": "z"}
+SGA_RE = re.compile("|".join(re.escape(k) for k in sorted(SGA, key=len, reverse=True)))
+
+
+def decode_sga(text):
+    """마법부여대 문자가 섞인 문장 -> 영어. 섞여 있지 않으면 그대로."""
+    return SGA_RE.sub(lambda m: SGA[m.group()], text)
+
+
 def npcs():
     """마을 NPC 이름·역할과 대사 일부. '노움이 뭐야?' 같은 질문이 장식 블록 노움으로만 가지 않게 한다."""
     lang = load_lang("dialog")
@@ -270,6 +282,11 @@ def npcs():
         lines = [f"{name}은(는) 선릿 밸리 마을에 사는 NPC(주민)입니다.{role_text} 우클릭으로 대화할 수 있습니다."]
         said = [clean(v) for k, v in lang.items() if k.startswith(f"dialog.npc.{npc}.") and ".line_" in k]
         lines += [f"대사: {s}" for s in said if mostly_hangul(s)][:6]
+        # clean()이 일부 기호(⚍ 등)를 지우므로 원문에서 먼저 푼다.
+        coded = [clean(decode_sga(v)) for k, v in lang.items()
+                 if k.startswith(f"dialog.npc.{npc}.") and ".line_" in k and SGA_RE.search(v)]
+        if coded:
+            lines.append("대사(마법부여대 문자로 말함, 영어로 풀면): " + " / ".join(coded[:4]))
         # 다른 NPC가 이 NPC를 언급한 대사
         lines += [f"다른 주민의 말: {clean(v)}" for k, v in lang.items()
                   if ".line_" in k and not k.startswith(f"dialog.npc.{npc}.") and name in v][:3]
@@ -587,6 +604,7 @@ def write_recipe_facts():
     if table is None:
         config.RECIPE_FACTS_FILE.unlink(missing_ok=True)
         return 0
+    drops = gamedata.loot_sources()
     with open(config.RECIPE_FACTS_FILE, "w", encoding="utf-8") as f:
         for item_id, entry in sorted(gamedata.names().items()):
             if entry.get("kind") not in ("item", "block"):
@@ -594,7 +612,9 @@ def write_recipe_facts():
             facts = table.get(item_id, {"make": [], "uses": []})
             uses = list(dict.fromkeys(clean(gamedata.display_name(i)) for i in facts["uses"]))
             f.write(json.dumps({"id": item_id, "make": facts["make"][:MAX_RECIPES_PER_ITEM],
-                                "uses": uses[:MAX_USES_PER_ITEM], "uses_total": len(uses)},
+                                "uses": uses[:MAX_USES_PER_ITEM], "uses_total": len(uses),
+                                # 전리품 테이블(몹·블록 드롭, 구조물 상자, 낚시). get_item 도구와 제작법 카드에 쓴다.
+                                "drops": drops.get(item_id, [])},
                                ensure_ascii=False) + "\n")
     return len(table)
 

@@ -322,6 +322,63 @@ ServerEvents.commandRegistry((event) => {
   });
 });
 
+// 답에 나온 아이템 이름에 마우스를 올리면 실제 아이템 툴팁이 뜨게 한다(show_item). 실패하면 글자만 보여준다.
+let $HoverEvent = null;
+let $HoverAction = null;
+let $ItemStackInfo = null;
+try {
+  $HoverEvent = Java.loadClass("net.minecraft.network.chat.HoverEvent");
+  $HoverAction = Java.loadClass("net.minecraft.network.chat.HoverEvent$Action");
+  $ItemStackInfo = Java.loadClass("net.minecraft.network.chat.HoverEvent$ItemStackInfo");
+} catch (err) {
+  console.warn(`[ASKHOWTO] 아이템 툴팁을 못 씁니다: ${err}`);
+}
+
+const askhowtoItemText = (name, id) => {
+  let text = Text.aqua(name);
+  if (!$HoverEvent) return text;
+  try {
+    let event = new $HoverEvent($HoverAction.SHOW_ITEM, new $ItemStackInfo(Item.of(id)));
+    text.setStyle(text.getStyle().withHoverEvent(event));
+  } catch (err) {
+    // 없는 아이템 ID 등: 글자만
+  }
+  return text;
+};
+
+// 답 한 줄을 글자 조각과 아이템 이름 조각으로 나눠 잇는다. items: [{name, id}] (긴 이름부터 겹치지 않게)
+const askhowtoRichLine = (line, items) => {
+  let marks = [];
+  items.forEach((item) => {
+    let from = 0;
+    while (true) {
+      let at = line.indexOf(item.name, from);
+      if (at < 0) break;
+      let end = at + item.name.length;
+      if (!marks.some((m) => at < m.end && m.start < end)) marks.push({ start: at, end: end, id: item.id });
+      from = end;
+    }
+  });
+  marks.sort((a, b) => a.start - b.start);
+  let out = Text.white("");
+  let last = 0;
+  marks.forEach((m) => {
+    if (m.start > last) out.append(Text.white(line.substring(last, m.start)));
+    out.append(askhowtoItemText(line.substring(m.start, m.end), m.id));
+    last = m.end;
+  });
+  if (last < line.length) out.append(Text.white(line.substring(last)));
+  return out;
+};
+
+const askhowtoParseItems = (text) =>
+  (text ? String(text) : "")
+    .split("\n")
+    .map((row) => row.split("\t"))
+    .filter((cols) => cols.length == 2 && cols[0].length > 0)
+    .map((cols) => ({ name: cols[0], id: cols[1] }))
+    .sort((a, b) => b.name.length - a.name.length);
+
 // 실패 안내(줄바꿈으로 이은 문자열) 중 아직 안 보여준 것만 보여준다. pending.shown에 보여준 개수를 둔다.
 const askhowtoShowNotices = (player, pending, text) => {
   let lines = text.split("\n").filter((line) => line.length > 0);
@@ -333,15 +390,20 @@ const askhowtoShowNotices = (player, pending, text) => {
 // 질문한 사람은 실패 안내를 그때그때 받으므로(askhowtoShowNotices) 한 줄 요약(notice)은 팀원에게만 보낸다.
 const askhowtoDeliver = (target, response, header) => {
   if (header) askhowtoTell(target, Text.gray(header));
+  let items = askhowtoParseItems(response.items);
   // Java List 변환에 기대지 않도록 답변·출처는 줄바꿈으로 이은 문자열 하나로 받는다.
   String(response.text)
     .split("\n")
     .forEach((line, i) => {
-      if (i == 0 && !header) askhowtoTell(target, Text.white(line));
-      else target.tell(Text.white(line));
+      let rich = askhowtoRichLine(line, items);
+      if (i == 0 && !header) askhowtoTell(target, rich);
+      else target.tell(rich);
     });
   let sources = response.sources ? String(response.sources) : "";
   if (sources) target.tell(Text.darkGray(`참고: ${sources.split("\n").join(" · ")}`));
+  // 넣어 준 자료 중 답에 쓰이지 않은 것 (빠뜨린 내용이 있는지 보이게)
+  let unused = response.unused ? String(response.unused) : "";
+  if (unused) target.tell(Text.darkGray(`(답에 안 쓴 관련 자료: ${unused.split("\n").join(", ")})`));
   // 서비스가 실패해 다음 서비스가 답했으면 알린다 (예: NVIDIA NIM 응답 실패(시간 초과) → Gemini로 답했어요)
   let notice = response.notice ? String(response.notice) : "";
   if (notice && header) target.tell(Text.darkGray(`(${notice})`));
