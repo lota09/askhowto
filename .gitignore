@@ -1,0 +1,16 @@
+# 비밀·개인 정보
+llm.env
+logs/
+data/memory/
+# Mojang 에셋(재배포 불가)과 build가 만드는 파일
+data/vanilla/
+data/chunks.jsonl
+data/names.jsonl
+data/recipes.jsonl
+data/places.json
+data/wiki/raw.json
+# 평가 결과·큐·도구 출력, 서버 경로 링크
+runs/
+links/
+__pycache__/
+*.pyc

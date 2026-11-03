@@ -1,0 +1,91 @@
+{
+ "Animals": [
+  "동물",
+  "가축"
+ ],
+ "Day Cycle": [
+  "하루 주기",
+  "낮과 밤"
+ ],
+ "Artisan Goods": [
+  "장인 상품",
+  "가공품"
+ ],
+ "Artisan Cheese Press": [
+  "치즈 프레스",
+  "치즈 압착기"
+ ],
+ "Canvas Loom": [
+  "캔버스 직기",
+  "직조기"
+ ],
+ "Bookseller": [
+  "책방지기",
+  "서점"
+ ],
+ "Ball Botique": [
+  "볼 부티크",
+  "공 상점"
+ ],
+ "Cafe Manager": [
+  "카페 관리인",
+  "카페 매니저"
+ ],
+ "Getting Started": [
+  "시작하기",
+  "초반 공략"
+ ],
+ "Farm House": [
+  "농가",
+  "농장 주택"
+ ],
+ "Frequently Asked Questions": [
+  "자주 묻는 질문",
+  "FAQ"
+ ],
+ "Friendship": [
+  "우정",
+  "호감도"
+ ],
+ "Golden Chapple": [
+  "황금 채플",
+  "골든 채플"
+ ],
+ "Moobloom": [
+  "무블룸",
+  "꽃 소"
+ ],
+ "Skills": [
+  "스킬",
+  "기술"
+ ],
+ "Troubleshooting Guide": [
+  "문제 해결 가이드",
+  "오류 해결"
+ ],
+ "Seasons": [
+  "계절"
+ ],
+ "Version History": [
+  "버전 기록",
+  "업데이트 내역"
+ ],
+ "Useful Tags": [
+  "유용한 태그"
+ ],
+ "Translations": [
+  "번역"
+ ],
+ "Sea Biscuit": [
+  "시 비스킷",
+  "바다 비스킷"
+ ],
+ "Ribbit Merchant": [
+  "리빗 상인",
+  "개구리 상인"
+ ],
+ "Poké Mart": [
+  "포켓 마트",
+  "포켓몬 마트"
+ ]
+}
