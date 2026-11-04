@@ -41,7 +41,7 @@ let askhowtoPending = {}; // id -> { uuid, name, time }
 let askhowtoLastAsk = {}; // uuid -> 마지막 질문 시각
 let askhowtoVotable = {}; // id -> { uuid, time } 평가할 수 있는 답 (한 번만)
 
-const askhowtoPrefix = () => Text.gold("[도우미] ");
+const askhowtoPrefix = () => Text.gold("[누렁이] ");
 
 const askhowtoTell = (player, message) => player.tell(askhowtoPrefix().append(message));
 
@@ -226,7 +226,7 @@ const askhowtoSubmit = (source, rawQuestion, action) => {
   }
   let status = askhowtoStatus();
   if (!status || now - Number(status.time) > ASKHOWTO_STALE_MS) {
-    askhowtoTell(player, Text.red("도우미가 꺼져 있어요. 관리자에게 알려주세요."));
+    askhowtoTell(player, Text.red("누렁이가 자고 있어요(도우미 꺼짐). 관리자에게 알려주세요."));
     return 0;
   }
 
