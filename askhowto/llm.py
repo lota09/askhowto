@@ -21,6 +21,8 @@ KIND_KO = {"limit": "사용 한도 초과", "timeout": "시간 초과", "server"
 
 # 지금까지 쓴 토큰 (worker가 요청마다 차이를 기록해 비용을 본다)
 USAGE = {"calls": 0, "prompt": 0, "completion": 0}
+# 마지막으로 답한 모델 (예비 모델이 답했을 수 있다. 로그에 실제 모델을 적으려고)
+LAST = {"model": None, "truncated": False}
 
 
 def chat(messages, provider, max_tokens=None, temperature=0.2, reasoning=None):
@@ -52,10 +54,15 @@ def message(messages, provider, max_tokens=None, temperature=0.2, reasoning=None
     models = [provider["model"]] + provider.get("backup_models", [])
     for i, model in enumerate(models):
         try:
-            return _request(provider, dict(payload, model=model), headers)
+            msg = _request(provider, dict(payload, model=model), headers)
+            # 빈 답(11/04 Gemini)도 예비 모델이 있으면 다시 해 본다. 마지막 모델의 빈 답은 부른 쪽이 판단한다.
+            if i + 1 < len(models) and not (msg.get("content") or "").strip() and not msg.get("tool_calls"):
+                raise LLMError(f"{model}: 빈 답", "empty")
+            LAST["model"] = model
+            return msg
         except LLMError as err:
-            # 한도·혼잡·시간 초과는 모델마다 따로라 예비 모델로 다시 해 본다. 그 밖의 오류는 예비 모델도 같다.
-            if i + 1 < len(models) and err.kind in ("limit", "busy", "timeout"):
+            # 한도·혼잡·시간 초과·빈 답은 모델마다 따로라 예비 모델로 다시 해 본다. 그 밖의 오류는 예비 모델도 같다.
+            if i + 1 < len(models) and err.kind in ("limit", "busy", "timeout", "empty"):
                 continue
             raise
 
@@ -72,6 +79,8 @@ def _request(provider, payload, headers):
             USAGE["calls"] += 1
             USAGE["prompt"] += usage.get("prompt_tokens") or 0
             USAGE["completion"] += usage.get("completion_tokens") or 0
+            # 출력 한도에 걸려 끊긴 답인지 (부른 쪽이 '잘림' 표시를 붙인다)
+            LAST["truncated"] = data["choices"][0].get("finish_reason") == "length"
             return data["choices"][0]["message"]
         except urllib.error.HTTPError as e:
             detail = e.read()[:200].decode("utf-8", "replace")

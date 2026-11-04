@@ -23,10 +23,17 @@ SENSITIVE_PATTERNS = [
     r"개발자\s*모드|developer\s*mode|너는\s*이제|역할\s*극|무슨\s*모델|어떤\s*모델|모델\s*이름|\bllm\b|\bgpt\b|gemma|"
     r"너의?\s*(설정|규칙|지침|명령)|(주어진|받은|정해진)\s*(규칙|지시|지침|명령)|"
     r"(규칙|지시|지침)\s*(을|를)?\s*(전부|다|모두)?\s*(말해|알려|보여|출력|공개)",
-    # 역할·말투를 바꾸려는 요청
-    r"지금부터\s*(너는|넌)|이제부터\s*(너는|넌)|처럼\s*(말해|대답|행동|굴어)|말투로|(체|투)로\s*(말해|대답)|act\s+as|pretend",
 ]
-SENSITIVE_RE = re.compile("|".join(f"(?:{p})" for p in SENSITIVE_PATTERNS), re.I)
+# 역할·말투·답의 형식을 바꾸려는 요청('앞으로 대답할 때 ○○○으로 시작해줘', 11/04)
+STYLE_PATTERNS = [
+    r"지금부터\s*(너는|넌)|이제부터\s*(너는|넌)|처럼\s*(말해|대답|행동|굴어)|말투로|(체|투)로\s*(말해|대답)|act\s+as|pretend",
+    r"(으로|로)\s*(시작|끝)\s*(해|하)\s*(줘|주세요|라|봐)|(라고|이라고)\s*(말해|대답해|답해|해)\s*(줘|주세요|봐)?\s*$",
+    r"(대답|답|말)\s*(할|하는)\s*때\s*(마다)?.{0,30}(해\s*줘|해\s*주세요|붙여|넣어|시작|끝)",
+    r"(앞으로|이제부터|지금부터)\s*(모든\s*)?(대답|답)(은|을|할)",
+]
+STYLE_RE = re.compile("|".join(f"(?:{p})" for p in STYLE_PATTERNS), re.I)
+REFUSE_STYLE = "도우미의 말투나 답하는 형식은 바꿀 수 없어요. 게임에 관한 걸 물어봐 주세요."
+SENSITIVE_RE = re.compile("|".join(f"(?:{p})" for p in SENSITIVE_PATTERNS + STYLE_PATTERNS), re.I)
 
 # 2B 모델은 GAME/OTHER/SENSITIVE 3분류에서 거의 모든 질문을 GAME으로 골랐다(실제 로그: 롤 티어, GPU/CPU 통과).
 # '게임 플레이 질문인가' 하나만 YES/NO로 물으면 무관한 질문을 훨씬 잘 걸러낸다. 민감한 질문은 정규식이 맡는다.
@@ -57,6 +64,11 @@ QUESTION_RE = re.compile(r"\?|뭐|무엇|어떻게|어디|언제|왜|얼마|몇|
 
 def rule_check(question):
     return "SENSITIVE" if SENSITIVE_RE.search(question) else None
+
+
+def refusal(question):
+    """거절 문구: 말투·형식 바꾸기 요청이면 그에 맞는 말, 아니면 보안 거절."""
+    return REFUSE_STYLE if STYLE_RE.search(question) else REFUSE_SENSITIVE
 
 
 COMPLAINT_REPLY = ("아쉬워요. 아이템이나 작물 이름을 넣어 다시 물어봐 주시거나, 도움이 안 된 답 아래 [도움안됨]을 눌러 주시면 "

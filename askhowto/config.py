@@ -18,6 +18,8 @@ PROGRESS_DIR = QUEUE_DIR / "progress"
 STATUS_FILE = QUEUE_DIR / "status.json"
 # 서버 시작 때 kubejs/askhowto_recipes.js가 쓰는 최종 레시피 목록
 RECIPES_FILE = Path(os.environ.get("ASKHOWTO_RECIPES_FILE", QUEUE_DIR / "recipes.json"))
+# 배송 상자 판매가 표 (kubejs/askhowto_prices.js가 서버 시작 때 씀)
+PRICES_FILE = Path(os.environ.get("ASKHOWTO_PRICES_FILE", QUEUE_DIR / "prices.json"))
 
 DATA_DIR = ROOT / "data"
 CHUNKS_FILE = DATA_DIR / "chunks.jsonl"
@@ -65,9 +67,12 @@ PROVIDERS = {
                      timeout=40, retries=1, tools=True),
     # 무료 등급. 빠르지만 분당 한도에 자주 걸린다(429면 바로 다음 서비스로).
     # 3.1-flash-lite가 혼잡(503)이거나 가끔 50초 가까이 걸려서, 한도가 따로인 3.5-flash-lite를 예비로 둔다(11/03).
+    # 시간 제한 15초: 11/04 밤에 3.1-lite가 30초를 다 쓰고 끊긴 뒤 예비 모델이 1~2초 만에 답한 일이 잦았다.
+    # 평소 답은 3~10초라 15초면 느린 요청만 예비 모델로 넘어간다.
+    # 출력 3,000토큰: reasoning low여도 생각에 960토큰까지 써서 1,000이면 답이 단어 중간에서 끊겼다(11/04 Altimeter 답).
     "gemini": _provider("gemini", "Gemini", "https://generativelanguage.googleapis.com/v1beta/openai",
                         "gemini-3.1-flash-lite", reasoning="low", classify_reasoning="none", context_chars=12000,
-                        top_k=20, max_tokens=1000, timeout=30, retries=1, tools=True,
+                        top_k=20, max_tokens=3000, timeout=15, retries=1, tools=True,
                         backup_models=("gemini-3.5-flash-lite",)),
     # 같은 네트워크의 로컬 Gemma. 컨텍스트 약 3.2K 토큰(실측)이라 자료는 4,000자까지만. 바쁘면 연결을 끊어서 여러 번 재시도한다.
     # 프롬프트 6,600자: 11/03 실측으로 약 6,900자(1,730토큰)를 넘으면 연결이 끊긴다.

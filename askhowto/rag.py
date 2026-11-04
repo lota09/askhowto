@@ -63,7 +63,7 @@ QUERY_EXPANSIONS = {
 }
 # 질문 의도. 이름이 나온 아이템에 제작법·쓰임새·같은 계열 카드를 붙일지 정한다 (모든 질문에 붙이면 작은 모델이 그대로 늘어놓는다).
 MAKE_INTENT_RE = re.compile(r"만들|만드|제작|조합|레시피|크래프|업그레이드|강화|구하|구해|얻|어디서|구매|사려|파는|못\s*만")
-USE_INTENT_RE = re.compile(r"어따|어디에\s*써|어디다|용도|쓰는|쓰임|쓸모|활용|써\?|쓰지")
+USE_INTENT_RE = re.compile(r"어따|어디에\s*써|어디다|용도|쓰는|쓰임|쓸모|활용|써\?|쓰지|기능|뭐에\s*써|뭐\s*하는\s*(거|것|아이템|블록)|역할")
 FAMILY_INTENT_RE = re.compile(r"업그레이드|강화|버전|등급|종류|단계|상위|하위|티어|테크|다음\s*(거|것|단계|등급)?|윗\s*단계|최종|더\s*좋은")
 # 같은 계열: 질문 속 이름으로 끝나는 다른 이름('물뿌리개' -> '철 물뿌리개'). 짧은 이름('밀')은 엉뚱한 게 붙어서 뺀다.
 FAMILY_MIN_KEY = 3
@@ -84,6 +84,8 @@ NPC_CONTEXT_RE = re.compile(r"마을|주민|npc|대화|선물|초대|호감|우�
 FUZZY_MAX_DISTANCE = 1.0
 FUZZY_MIN_LEN = 3
 FUZZY_MAX_LEN = 8
+SUFFIX_MAX_NAMES = 3
+SUFFIX_MAX_DF = 50
 
 
 def tokenize(text, query=False):
@@ -156,7 +158,15 @@ def matched_note(name, matched):
     if not matched:
         return ""
     compact = lambda t: re.sub(r"\s+", "", t.lower())
-    return "" if compact(matched) in compact(name) else f" (질문 속 '{matched}')"
+    # 제목('아이템 정보: 강 젤리', '철 곡괭이 (Iron Pickaxe)')에서 이름 부분만 비교한다.
+    m, n = compact(matched), compact(name)
+    base = re.sub(r"\(.*\)$", "", n.split(":")[-1])
+    if m == base or (m in n and m not in base):
+        return ""
+    if m in base:
+        # 이름 일부로 찾은 것('통발' -> '게잡이 통발', '호박' -> '호박씨')은 다른 대상일 수 있다.
+        return f" (질문 속 '{matched}'로 찾은 이름. 질문 대상과 다르면 무시)"
+    return f" (질문 속 '{matched}')"
 
 
 class Index:
@@ -216,6 +226,11 @@ class Index:
             if FUZZY_MIN_LEN <= len(key) <= FUZZY_MAX_LEN and all("가" <= ch <= "힣" for ch in key):
                 self.fuzzy_keys.setdefault(len(key), []).append(key)
         self.dict_by_key = by_key
+        # 뒷부분 맞추기용: 마지막 글자 -> 한글로만 된 이름들
+        self.suffix_keys = {}
+        for key in list(self.by_name) + list(by_key):
+            if all("가" <= ch <= "힣" for ch in key):
+                self.suffix_keys.setdefault(key[-1], []).append(key)
         # 이름 -> 그 이름을 쓰는 모든 ID (같은 한국어 이름의 아이템이 여러 모드에 있다). 제작법 카드에 쓴다.
         self.ids_by_key, self.dict_by_id = {}, {}
         for entry in dictionary:
@@ -225,11 +240,23 @@ class Index:
                 if key and entry["id"] not in self.ids_by_key.setdefault(key, []):
                     self.ids_by_key[key].append(entry["id"])
 
-    def match_names(self, question):
-        """질문에 나온 이름 -> (확정 정보로 넣을 조각들, 조각은 없고 사전에만 있는 항목들). 질문에 나온 순서."""
+    def match_names(self, question, exact=()):
+        """질문에 나온 이름 -> (확정 정보로 넣을 조각들, 조각은 없고 사전에만 있는 항목들). 질문에 나온 순서.
+        exact: 질문에는 없지만 가리키는 대상의 정확한 이름(손에 든 아이템 등). 길이·흔한 말 제한 없이 맨 앞에 넣는다
+        ('밤'처럼 한 글자 이름은 질문 속에서는 찾지 않지만, 손에 든 아이템이면 확실하다)."""
         q = question.lower()
         compact = re.sub(r"\s+", "", q)
         taken, found, extras = [], [], []
+        keys = []  # (위치, 이름) 제작법 카드용
+        for name in exact:
+            key = re.sub(r"\s+", "", (name or "").lower())
+            if key in self.by_name:
+                found.append((-1, self.by_name[key], name))
+                keys.append((-1, key))
+            elif self.ids_by_key.get(key):
+                entry = self.dict_by_id[self.ids_by_key[key][0]]
+                extras.append((-1, key, dict(entry, matched=name)))
+                keys.append((-1, key))
 
         def first_free(key):
             for m in name_pattern(key).finditer(q):
@@ -240,7 +267,6 @@ class Index:
                     return m
             return None
 
-        keys = []  # (위치, 이름) 제작법 카드용
         # 자료 조각 이름과 사전 이름을 합쳐 긴 것부터 맞춘다('철 낚싯대'가 '낚싯대'보다 먼저).
         for key, value, is_dict in self.all_names:
             if key in compact and (m := first_free(key)):
@@ -249,7 +275,10 @@ class Index:
                 else:
                     found.append((m.start(), value, m.group().strip()))
                 keys.append((m.start(), key))
-        for start, key, surface in self.fuzzy_matches(q, taken):
+        fuzzy = self.fuzzy_matches(q, taken)
+        # 뒷부분 맞추기는 다른 이름을 하나도 못 찾았을 때만 한다('바닥에 돌멩이나 조개' -> '이끼 바닥'이 끼어들었다).
+        fuzzy += [] if found or extras or fuzzy else self.suffix_matches(q, taken)
+        for start, key, surface in fuzzy:
             if key in self.by_name:
                 found.append((start, self.by_name[key], surface))
             else:
@@ -268,6 +297,9 @@ class Index:
             # 같은 이름이 마을 NPC와 블록·아이템을 함께 가리키면, 질문에 '마을·주민' 같은 말이 있을 때 NPC 자료를 먼저 둔다.
             if npc_first:
                 idxs = sorted(idxs, key=lambda i: self.chunks[i]["source"] != "npc")
+            elif USE_INTENT_RE.search(q):
+                # 용도를 물으면 아이템 설명을 구매·획득 카드보다 먼저 둔다(11/04 '용도'에 수급처만 답함).
+                idxs = sorted(idxs, key=lambda i: self.chunks[i]["source"] != "item")
             note = self.senses_card(surface, idxs)
             chunks += ([note] if note else []) + [dict(self.chunks[i], matched=surface) for i in idxs[:MAX_CHUNKS_PER_NAME]]
         key = self.intent_target(question, sorted(keys))
@@ -301,6 +333,24 @@ class Index:
         return {"id": f"senses:{name}", "source": "senses", "title": f"'{name}'은(는) 여러 대상을 가리키는 이름",
                 "text": "\n".join(lines) + "\n질문 맥락(마을·주민이면 NPC, 설치·장식이면 블록 등)에 맞는 대상을 골라 답한다. "
                         "맥락으로 알 수 없으면 각각 한 줄씩 짧게 설명한다.", "matched": name}
+
+    def suffix_matches(self, q, taken):
+        """이름의 뒷부분만 쓴 단어('통발' -> '게잡이 통발')를 그 이름과 맞춘다 -> [(위치, 이름 키, 질문 속 표기)].
+        그 말로 끝나는 이름이 SUFFIX_MAX_NAMES개 이하일 때만('상자'로 끝나는 이름은 200개 가까이 된다)."""
+        out = []
+        for m in re.finditer(r"[가-힣]+", q):
+            if any(m.start() < e and s < m.end() for s, e in taken):
+                continue
+            word = re.sub(rf"(?:{JOSA})$", "", m.group()) or m.group()
+            # 흔한 말('작물' 87, '마트' 110개 문서)은 뺀다. '통발'은 22개.
+            if len(word) < 2 or word in QUERY_STOPWORDS or self.word_df[word] >= SUFFIX_MAX_DF:
+                continue
+            keys = [k for k in self.suffix_keys.get(word[-1], ()) if k.endswith(word) and k != word
+                    and len(k) - len(word) <= FAMILY_MAX_PREFIX]
+            if 0 < len(keys) <= SUFFIX_MAX_NAMES:
+                out += [(m.start(), k, word) for k in sorted(keys, key=lambda k: (k not in self.by_name, len(k)))]
+                taken.append((m.start(), m.start() + len(word)))
+        return out
 
     def fuzzy_matches(self, q, taken):
         """정확히 맞는 이름이 없는 한글 단어를 오타 허용으로 이름과 맞춘다 -> [(위치, 이름 키, 질문 속 표기)].

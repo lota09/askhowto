@@ -100,7 +100,8 @@ def read_page(index, title, section=""):
 
 def get_item(index, name):
     """이름 하나에 대한 확정 정보 전부. 이름 매칭(오타 허용)으로 찾고, 제작법 카드는 모든 의도로 만든다."""
-    pinned, extras = index.match_names(name)
+    # 정확한 이름이면 한 글자 이름('밤')도 찾는다.
+    pinned, extras = index.match_names(name, exact=[name.strip()])
     if not pinned and not extras:
         return f"'{name}'이라는 아이템을 찾지 못했다. 다른 이름(영어 이름 등)이나 search_docs로 찾아본다."
     out, used = [], 0

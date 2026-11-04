@@ -41,7 +41,7 @@ _langs = None
 
 
 def langs():
-    """모든 lang 파일을 합친 (ko, en): lang 키 -> 문자열. 바닐라 + 모드 jar의 en_us + kubejs/assets의 ko_kr·en_us."""
+    """모든 lang 파일을 합친 (ko, en): lang 키 -> 문자열. 바닐라 + 모드 jar의 en_us·ko_kr + kubejs/assets의 ko_kr·en_us."""
     global _langs
     if _langs is not None:
         return _langs
@@ -52,6 +52,10 @@ def langs():
             target.update(_load_json(path.read_text(encoding="utf-8")) or {})
     for _, _, data in _jar_files(re.compile(r"assets/[^/]+/lang/en_us\.json$")):
         en.update(_load_json(data) or {})
+    # 모드 jar의 ko_kr도 읽는다(플레이어 화면에 보이는 이름). 빠뜨리면 '고도계'가 'Altimeter'로만 남았다(11/04).
+    # kubejs/assets의 ko_kr(팩 번역)이 뒤에서 덮어쓴다.
+    for _, _, data in _jar_files(re.compile(r"assets/[^/]+/lang/ko_kr\.json$")):
+        ko.update(_load_json(data) or {})
     assets = config.SERVER_DIR / "kubejs" / "assets"
     for path in assets.glob("*/lang/en_us.json"):
         en.update(_load_json(path.read_text(encoding="utf-8")) or {})
@@ -79,6 +83,10 @@ def translations():
     return out
 
 
+NAME_KIND_ORDER = {"item": 0, "block": 1, "entity": 2, "effect": 3}
+FORMAT_ARG_RE = re.compile(r"%(\d+\$)?[sd]")
+
+
 def names():
     """아이템/블록/몹/효과 ID -> {"ko", "en", "kind"}. 'item.society.geode' 같은 lang 키에서 만든다."""
     global _names
@@ -86,16 +94,23 @@ def names():
         return _names
     ko, en = langs()
     out = {}
-    for key in set(ko) | set(en):
+    # 같은 ID의 item·block·entity 키가 함께 있으면 item 이름을 먼저 쓴다. 집합 순서대로 돌면 실행할 때마다
+    # '달걀'이 '던져진 달걀'(entity 키)이 되기도 했다(11/04).
+    keys = sorted(set(ko) | set(en), key=lambda k: (NAME_KIND_ORDER.get(k.split(".")[0], 9), k))
+    for key in keys:
         m = NAME_KEY_RE.match(key)
         if not m or "." in m.group(3):
             continue
         item_id = f"{m.group(2)}:{m.group(3)}"
         entry = out.setdefault(item_id, {"kind": m.group(1)})
-        if isinstance(ko.get(key), str) and "ko" not in entry:
-            entry["ko"] = ko[key]
-        if isinstance(en.get(key), str) and "en" not in entry:
-            entry["en"] = en[key]
+        for lang, field in ((ko, "ko"), (en, "en")):
+            # '%s%s구리 상자'처럼 앞에 붙는 말 자리(%s)는 뺀다.
+            text = FORMAT_ARG_RE.sub("", lang[key]).strip() if isinstance(lang.get(key), str) else ""
+            if text and field not in entry:
+                entry[field] = text
+            elif text and m.group(1) == "entity" and entry["kind"] != "entity" and text != entry.get(field):
+                # 아이템과 같은 ID의 몹('minecraft:rabbit' = 익히지 않은 토끼고기 / 토끼)은 몹 이름을 따로 둔다.
+                entry.setdefault("mob", {})[field] = text
     _compose_ko(out)
     _names = out
     return out
@@ -216,7 +231,7 @@ def _season_text(seasons_required):
 
 
 def shop_sources():
-    """아이템 ID -> ['마트에서 코인 4에 판매 (봄, 여름, 가을)', ...]"""
+    """아이템 ID -> ['마트에서 코인 4에 살 수 있음, 봄, 여름, 가을에만', ...]"""
     lang = {}
     path = config.SERVER_DIR / "kubejs" / "assets" / "society_trading" / "lang" / "ko_kr.json"
     if path.exists():
@@ -240,7 +255,8 @@ def shop_sources():
             else:
                 continue
             count = offer.get("count", 1)
-            line = f"{shop_name}에서 {price}에 판매" + (f" ({count}개)" if count > 1 else "")
+            # '판매'라고 쓰면 모델이 플레이어가 파는 것으로 읽는다(11/04 대나무). 플레이어가 사는 값임을 분명히 쓴다.
+            line = f"{shop_name}에서 {price}에 살 수 있음" + (f" ({count}개 묶음)" if count > 1 else "")
             season = _season_text(trade.get("seasons_required"))
             if season:
                 line += f", {season}에만"
@@ -405,6 +421,25 @@ def _station(rtype):
 
 
 RECIPE_DUMP_VERSION = 2
+
+
+
+
+def sell_prices():
+    """배송 상자 판매가(config.PRICES_FILE, kubejs/askhowto_prices.js가 서버 시작 때 씀): 아이템 ID -> 카드 한 줄.
+    '<ID>/<변종>' 키(슬라임 플로트·나비 변종)는 뺀다. 파일이 없으면 빈 dict."""
+    if not config.PRICES_FILE.exists():
+        return {}
+    raw = _load_json(config.PRICES_FILE.read_text(encoding="utf-8")) or {}
+    raw.pop("_askhowto", None)
+    out = {}
+    for item_id, trade in raw.items():
+        if "/" in item_id or not isinstance(trade, dict) or not trade.get("value"):
+            continue
+        # 품질 배수: globalShippingBinHandlers.js calculateQualityValue (별 1·2·3개 = 1.25·1.5·2배)
+        out[item_id] = (f"배송 상자에 넣어 팔면 코인 {int(trade['value']):,} "
+                        f"(품질 별 1·2·3개면 1.25·1.5·2배, 스킬 판매 배수는 따로)")
+    return out
 
 
 def recipes():

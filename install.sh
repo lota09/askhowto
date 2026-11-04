@@ -9,6 +9,6 @@ SERVER_DIR=${ASKHOWTO_SERVER_DIR:-../../servers/SocietySunlitValley415A1201}
 python3 -m askhowto build
 # JsonIO.write는 폴더를 만들지 않아서 미리 만들어 둔다.
 mkdir -p "$SERVER_DIR/local/askhowto/requests" "$SERVER_DIR/local/askhowto/responses" "$SERVER_DIR/local/askhowto/feedback"
-cp kubejs/askhowto.js kubejs/askhowto_recipes.js "$SERVER_DIR/kubejs/server_scripts/"
-echo "복사함: $SERVER_DIR/kubejs/server_scripts/askhowto.js, askhowto_recipes.js"
+cp kubejs/askhowto.js kubejs/askhowto_recipes.js kubejs/askhowto_prices.js "$SERVER_DIR/kubejs/server_scripts/"
+echo "복사함: $SERVER_DIR/kubejs/server_scripts/askhowto.js, askhowto_recipes.js, askhowto_prices.js"
 echo "다음: 서버 재시작(/reload 금지), 그리고 tmux new -d -s askhowto $PWD/run.sh"

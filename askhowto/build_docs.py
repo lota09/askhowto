@@ -230,7 +230,17 @@ def mod_items():
             if m:
                 descs.setdefault(m.group(1), []).append(clean(value))
         for base, lines in descs.items():
-            name = clean(lang.get(base, ""))
+            name, item_id = clean(lang.get(base, "")), lang_key_id(base)
+            if not name:
+                # 이름 키가 없는 설명: 같은 ID의 사전 이름(영어만 있는 모드), 그래도 없으면 다른 모드의 같은 이름 ID.
+                # 이 팩은 다른 모드 아이템의 설명을 item.society.<이름>.description 으로 단다(collar_tag 등, 11/04).
+                entry = gamedata.names().get(item_id) or {}
+                if not entry.get("ko") and not entry.get("en"):
+                    path = base.split(".")[-1]
+                    item_id = next((i for i, e in gamedata.names().items()
+                                    if i.split(":")[-1] == path and (e.get("ko") or e.get("en"))), item_id)
+                    entry = gamedata.names().get(item_id) or {}
+                name = clean(entry.get("ko") or entry.get("en") or "")
             if not name:
                 continue
             # 다른 키(block.society.ancient_goddess_statue.spring 등)에 붙은 설명도 함께 넣는다.
@@ -240,7 +250,7 @@ def mod_items():
             if not lines:
                 continue
             kind = "블록" if base.startswith("block.") else "아이템"
-            out += chunk("item", base, f"{kind}: {name}", lines, names=aliases(name, lang_key_id(base)))
+            out += chunk("item", base, f"{kind}: {name}", lines, names=aliases(name, item_id))
     return out
 
 
@@ -528,7 +538,7 @@ def manual():
 
 
 def acquisition():
-    """아이템마다 '어디서 얻나 / 제철'을 한 카드로. 상점, 슬라임 플로트, 가축 생산품, 계절 태그에서 모은다.
+    """아이템마다 '어디서 얻나 / 얼마에 파나 / 제철'을 한 카드로. 상점, 슬라임 플로트, 배송 상자 판매가, 가축 생산품, 계절 태그에서 모은다.
     같은 한국어 이름의 아이템(예: 여러 모드의 '토마토')은 한 카드로 합친다. patchouli() 뒤에 불러야 한다."""
     facts = {}  # 한국어 이름 -> {"ids": [...], "lines": [...]}
 
@@ -548,6 +558,8 @@ def acquisition():
     for item_id, lines in gamedata.slime_sources().items():
         for line in lines:
             add(item_id, f"획득: {line}")
+    for item_id, line in gamedata.sell_prices().items():
+        add(item_id, f"판매: {line}")
     for item_id, seasons in gamedata.crop_seasons().items():
         add(item_id, f"제철(자라는 계절): {', '.join(seasons)}")
     by_ko = {}
@@ -572,11 +584,13 @@ def write_names():
     """질문 속 이름을 알아보기 위한 사전(data/names.jsonl). 자료 조각이 없는 아이템·몹도 여기서 알아본다."""
     with open(config.NAMES_FILE, "w", encoding="utf-8") as f:
         for item_id, entry in sorted(gamedata.names().items()):
-            ko, en = clean(entry.get("ko", "")), clean(entry.get("en", ""))
-            if "%" in ko or "%" in en or not (ko or en):
-                continue
-            f.write(json.dumps({"id": item_id, "kind": entry["kind"], "ko": ko, "en": en,
-                                "alias": gamedata.id_alias(item_id)}, ensure_ascii=False) + "\n")
+            # 같은 ID의 몹 이름이 따로 있으면 몹 줄을 먼저 쓴다(같은 ID면 나중 줄인 아이템이 대표가 된다).
+            for kind, names in (("entity", entry.get("mob") or {}), (entry["kind"], entry)):
+                ko, en = clean(names.get("ko", "")), clean(names.get("en", ""))
+                if "%" in ko or "%" in en or not (ko or en):
+                    continue
+                f.write(json.dumps({"id": item_id, "kind": kind, "ko": ko, "en": en,
+                                    "alias": gamedata.id_alias(item_id)}, ensure_ascii=False) + "\n")
 
 
 def write_places():
