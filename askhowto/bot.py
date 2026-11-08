@@ -1,4 +1,5 @@
 """질문 하나를 받아 답을 만드는 파이프라인: 가드 → 검색(이름 고정 + BM25) → 분류 → LLM → 채팅용 정리."""
+import json
 import re
 import time
 
@@ -142,6 +143,8 @@ def search(question, extra_names=()):
     english = [n for c in pinned for n in c.get("names", [])[1:] if n.isascii()] + [e.get("en", "") for e in extras]
     # 가리키는 말('이건')은 검색어에서 뺀다. 남겨 두면 '이건 먹어도 됩니다' 같은 엉뚱한 글이 걸렸다(11/04 '밤').
     text = REF_WORDS_RE.sub(" ", question) if extra_names else question
+    # 질문의 영어 낱말이 가리키는 한국어 이름도 더한다('enchant 하는 법' -> '마법 부여대').
+    korean += index().english_terms(question)
     query = " ".join([text, *extra_names] + korean + list(dict.fromkeys(english)))
     hits = index().search(query, k=config.SEARCH_K, names=korean)
     # 1글자 단위 점수는 어떤 한국어 문장에나 조금씩 붙으므로 '게임 용어가 걸렸나' 판단에는 빼고 본다.
@@ -177,11 +180,33 @@ def referent_names(question, history, state):
     return []
 
 
+# 서비스가 시간 초과·한도·혼잡 등으로 실패하면 잠시 건너뛴다(11/07: NIM이 1시간 반 동안 8번 연속 40초를 다 쓰고 실패했다).
+# 이 시간이 지나면 다시 시도해 보고, 되면 원래 순서로 돌아온다.
+COOLDOWN_SECONDS = 300
+COOLDOWN_KINDS = ("timeout", "limit", "busy", "server", "network")
+COOLDOWN = {}  # 서비스 이름 -> 건너뛰기가 끝나는 시각
+
+
 def provider_chain(choice):
-    """/askmodel 선택 -> 시도할 서비스 순서. default면 config.DEFAULT_CHAIN, 직접 고른 서비스는 그것 하나(폴백 없음)."""
+    """/askmodel 선택 -> 시도할 서비스 순서. default면 config.DEFAULT_CHAIN, 직접 고른 서비스는 그것 하나(폴백 없음).
+    default에서는 최근에 실패한 서비스를 뒤로 미룬다(모두 실패 중이면 원래 순서)."""
     if choice in config.PROVIDERS:
         return [config.PROVIDERS[choice]]
-    return [config.PROVIDERS[name] for name in config.DEFAULT_CHAIN if name in config.PROVIDERS]
+    chain = [config.PROVIDERS[name] for name in config.DEFAULT_CHAIN if name in config.PROVIDERS]
+    now = time.time()
+    cloud = [p for p in chain if p["tools"]]
+    ready = [p for p in cloud if COOLDOWN.get(p["name"], 0) <= now]
+    # 클라우드가 모두 건너뛰기 중이어도 로컬로 바로 가지 않는다(11/09 로컬이 엉터리로 답했다). 건너뛰기는 클라우드끼리 순서만 바꾼다.
+    order = (ready + [p for p in cloud if p not in ready]) if ready else cloud
+    return order + [p for p in chain if not p["tools"]]
+
+
+def note_result(provider, err=None):
+    """서비스 결과를 건너뛰기 표에 반영한다."""
+    if err is None:
+        COOLDOWN.pop(provider["name"], None)
+    elif err.kind in COOLDOWN_KINDS:
+        COOLDOWN[provider["name"]] = time.time() + COOLDOWN_SECONDS
 
 
 def failure_notice(failures, used=None):
@@ -206,6 +231,7 @@ def answer(question, choice="default", history=(), state=None, on_failure=None):
     on_failure(notice, name, err): 서비스가 실패할 때마다 바로 불린다(로그·채팅에 실패를 그때그때 알리려고).
     notices는 그 안내들의 목록이다."""
     history = list(history or [])
+    llm.CALLS.clear()
     question = question.strip()[:config.QUESTION_MAX_CHARS]
     if guard.rule_check(question):
         return result("SENSITIVE", [guard.refusal(question)])
@@ -231,14 +257,18 @@ def answer(question, choice="default", history=(), state=None, on_failure=None):
         try:
             res = answer_with(provider, question, pinned, extras, hits, strong, history, state, referred)
         except llm.LLMError as err:
+            note_result(provider, err)
             failures.append((provider["name"], err))
             notices.append(step_notice(provider["name"], err, chain[n + 1] if n + 1 < len(chain) else None))
             if on_failure:
                 on_failure(notices[-1], provider["name"], err)
             continue
+        note_result(provider)
         names = [c["names"][0] for c in pinned if c.get("names") and c["source"] != "wiki"]
         names += [e.get("ko") or e.get("en") for e in extras]
-        res.update(provider=provider["name"], model=llm.LAST["model"] or provider["model"],
+        # 도구로 찾은 아이템도 다음 질문의 '그거'가 될 수 있다(11/08 '아티펙트 사용법' 다음 '그냥 파는 용도임?').
+        names += tool_targets(res.get("tools", []))
+        res.update(provider=provider["name"], model=llm.LAST["model"] or provider["model"], calls=list(llm.CALLS),
                    fallbacks=[{"provider": n, "kind": e.kind, "error": str(e)[:200]} for n, e in failures],
                    notice=failure_notice(failures, provider), notices=notices, referred=referred,
                    names=list(dict.fromkeys(n for n in names if n))[:3] or list(referred))
@@ -264,14 +294,22 @@ def history_block(history, room=None):
     return HISTORY_HEAD + "\n".join(lines) + "\n\n" if lines else ""
 
 
-def state_block(state):
+# 값·가치를 묻는 질문이면 플레이어 상태에 인벤토리 판매가 합계를 더한다.
+VALUE_RE = re.compile(r"가치|얼마|값|가격|판매가|팔면|시세|돈\s*(이|으로)?\s*(되|벌)")
+
+
+def state_block(state, question=""):
     if not state or not state.get("text"):
         return ""
+    text = state["text"]
+    if state.get("value_text") and VALUE_RE.search(question):
+        text += "\n" + state["value_text"]
     return ("[플레이어 상태] 질문한 플레이어의 지금 상태. 질문과 관련 있을 수도, 없을 수도 있다. 관련 있을 때만 참고한다.\n"
-            f"{state['text']}\n\n")
+            f"{text}\n\n")
 
 
-# 도구를 쓰는 클라우드 모델은 질문 하나에 LLM을 최대 2번 부른다(11/03 사용자 결정).
+# 도구를 쓰는 클라우드 모델은 질문 하나에 LLM을 보통 최대 2번 부른다(11/03 사용자 결정).
+#   2번째 호출에서 모델이 자료를 더 원하면 그때만 한 번 더 찾아 3번째로 답한다(11/07 사용자 결정, final_answer).
 #   1번: 검색 자료로 답한다. 모자라면 모델이 도구(search_docs, read_page, get_item)를 요청한다.
 #   2번: 도구 결과를 받아 답한다. 모델이 도구 없이 '모른다'고 답했으면 사이드카가 대신 더 찾아 넣고 다시 답하게 한다.
 # 게임 질문인지 따로 묻는 분류 호출은 하지 않는다(일반 질문도 답하므로 1번 호출이 함께 판단한다).
@@ -279,7 +317,9 @@ MAX_TOOL_CALLS = 3  # 1번 호출이 한꺼번에 요청한 도구 중 실행할
 TOOL_RULE = """
 10. 도구: [자료]로 답할 수 있으면 도구 없이 바로 답한다. 자료가 부족하거나 질문 대상이 자료에 없으면 답하지 말고 도구를 요청한다.
    아이템·블록 하나를 물으면 get_item, 그 밖의 내용은 search_docs, 위키 문서의 특정 섹션은 read_page.
-   필요한 도구는 이번에 한꺼번에 요청한다(다음 기회는 없다). 오타가 있어 보이면(예: tulnip) 맞는 이름으로 고쳐서 찾는다.
+   필요한 도구는 이번에 한꺼번에 요청한다. 오타가 있어 보이면(예: tulnip) 맞는 이름으로 고쳐서 찾는다.
+   질문의 말이 자료에 없으면 한국어판 게임의 공식 용어로 바꿔서도 찾는다(외래어·영어 -> 공식 용어. 예: 인챈트 -> 마법 부여,
+   스폰 -> 생성, 크래프팅 -> 제작). 찾아보지 않고 "자료에서 찾지 못했어요"로 답하지 않는다.
 11. 게임과 관계없는 질문이면 자료·도구 없이 일반 지식으로 짧게 답한다."""
 # '모른다'는 답: 이러면 사이드카가 대신 더 찾아 넣고 한 번 더 답하게 한다.
 NEED_MORE_RE = re.compile(NOT_FOUND_RE.pattern + r"|정보가\s*없|확인되지\s*않|확인할\s*수\s*없|나와\s*있지\s*않")
@@ -288,8 +328,67 @@ NEED_MORE_RE = re.compile(NOT_FOUND_RE.pattern + r"|정보가\s*없|확인되지
 MAX_AUTO_ITEMS = 2
 
 
+# glm은 도구 호출을 가끔 글로 쓴다: <tool_call>read_page<arg_key>title</arg_key><arg_value>Tapper</arg_value></tool_call>
+# (11/06·11/07 이 글이 채팅에 그대로 나갔다). 읽어서 실제 도구 호출로 실행한다.
+TEXT_CALL_RE = re.compile(r"<tool_call>\s*([A-Za-z_]+)(.*?)(?:</tool_call>|$)", re.S)
+TEXT_ARG_RE = re.compile(r"<arg_key>\s*(.*?)\s*</arg_key>\s*<arg_value>\s*(.*?)\s*</arg_value>", re.S)
+TOOL_MARKUP_RE = re.compile(r"<tool_call>.*?(?:</tool_call>|$)|</?arg_(?:key|value)>", re.S)
+# 2번째 호출에서도 모델이 자료를 더 원하면 그때만 한 번 더 찾아 3번째로 답하게 한다(11/07 사용자 결정 A).
+MAX_EXTRA_TOOL_CALLS = 3
+
+
+def tool_targets(log):
+    """도구 기록에서 get_item으로 찾은 이름들."""
+    out = []
+    for t in log:
+        if t["name"] in ("get_item", "auto_get_item"):
+            args = t["arguments"]
+            try:
+                args = json.loads(args) if isinstance(args, str) and args.startswith("{") else {"name": args}
+            except ValueError:
+                continue
+            if isinstance(args, dict) and args.get("name"):
+                out.append(str(args["name"]))
+    return out
+
+
+def text_tool_calls(text):
+    """글로 쓴 도구 호출 -> [(이름, 인자 dict)]. 없으면 []."""
+    return [(m.group(1), dict(TEXT_ARG_RE.findall(m.group(2)))) for m in TEXT_CALL_RE.finditer(text or "")]
+
+
+def strip_tool_markup(text):
+    return TOOL_MARKUP_RE.sub("", text or "").strip()
+
+
+def run_text_calls(calls, messages, text, seen, log, limit):
+    """글로 쓴 도구 호출을 실행하고, 결과를 사용자 메시지로 붙인다(호출 ID가 없어서 tool 메시지로는 못 붙인다)."""
+    outputs = []
+    for name, args in calls[:limit]:
+        # 모델이 인자 이름을 틀리게 쓰기도 한다('page' 대신 'title').
+        if name == "read_page" and "title" not in args and "page" in args:
+            args["title"] = args.pop("page")
+        output = tools.run(index(), name, args, seen)
+        log.append({"name": name, "arguments": json.dumps(args, ensure_ascii=False), "chars": len(output), "text_call": True})
+        outputs.append(f"[{name} 결과]\n{output}")
+    messages.append({"role": "assistant", "content": text})
+    messages.append({"role": "user", "content": "[도구 결과] 요청한 도구를 실행한 결과다. 이제 도구 없이 이 결과와 앞의 자료로 답한다.\n\n"
+                                                + "\n\n".join(outputs)})
+
+
+def final_answer(messages, provider, seen, log, extra=True):
+    """도구 결과를 받은 뒤의 답(2번째 호출). 여기서도 도구를 글로 요청하면 실행하고 한 번 더 답하게 한다(3번째 호출).
+    extra=False면 이미 3번째라 더 부르지 않는다. 도구 호출 글은 지우고, 남는 게 없으면 '찾지 못했어요'."""
+    text = llm.message(messages, provider, tools=tools.SPECS, tool_choice="none").get("content") or ""
+    calls = text_tool_calls(text)
+    if calls and extra:
+        run_text_calls(calls, messages, text, seen, log, MAX_EXTRA_TOOL_CALLS)
+        text = llm.message(messages, provider, tools=tools.SPECS, tool_choice="none").get("content") or ""
+    return strip_tool_markup(text) or (NOT_FOUND if text.strip() else "")
+
+
 def call_with_tools(messages, provider, seen, question, names=()):
-    """LLM 최대 2번으로 답을 받는다 -> (답, [도구 기록]).
+    """LLM 2번(필요하면 3번)으로 답을 받는다 -> (답, [도구 기록]).
     names: 질문이 가리키는 대상 이름들(질문에 나온 이름, '그거/이거'가 가리킨 이름). 모델이 모른다고 하면 이걸로 대신 찾는다."""
     msg = llm.message(messages, provider, tools=tools.SPECS)
     text, calls, log = msg.get("content") or "", msg.get("tool_calls") or [], []
@@ -303,8 +402,11 @@ def call_with_tools(messages, provider, seen, question, names=()):
             else:
                 output = "도구 요청이 너무 많아 실행하지 않았다."
             messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": output})
-        final = llm.message(messages, provider, tools=tools.SPECS, tool_choice="none")
-        return final.get("content") or "", log
+        return final_answer(messages, provider, seen, log), log
+    if text_tool_calls(text):
+        # 첫 호출부터 도구를 글로 요청했다: 진짜 도구 호출처럼 실행한다.
+        run_text_calls(text_tool_calls(text), messages, text, seen, log, MAX_TOOL_CALLS)
+        return final_answer(messages, provider, seen, log), log
     if text.strip() and not NEED_MORE_RE.search(text):
         return text, log
     # 모델이 찾아보지 않고 모른다고 했다: 대상마다 아이템 정보 전부(같은 계열·드롭·제작법)를 가져오고,
@@ -317,8 +419,28 @@ def call_with_tools(messages, provider, seen, question, names=()):
     parts.append(tools.search_docs(index(), query, seen))
     log.append({"name": "auto_search_docs", "arguments": query, "chars": len(parts[-1])})
     extra = "\n\n".join(parts)[:tools.MAX_RESULT_CHARS * 2]
-    messages.append({"role": "user", "content": f"[추가 자료] 앞의 자료에 없어서 더 찾은 자료다. 이것까지 보고 다시 답한다.\n{extra}"})
-    return llm.chat(messages, provider), log
+    # 이 자료로도 모자라면 모델이 직접 도구로 찾게 한다(11/08 '인챈트 어캐함?': 사이드카는 '인챈트'로만 찾아 실패했고,
+    # 모델은 '마법 부여'로 바꿔 찾을 줄 안다). 도구를 쓰면 3번째 호출로 답한다.
+    messages.append({"role": "user", "content": "[추가 자료] 찾아보지 않고 모른다고 했다. 앞의 자료에 없어서 더 찾은 자료다. "
+                     "이것으로 답할 수 있으면 답하고, 모자라면 도구로 직접 찾는다(질문의 말을 한국어판 공식 용어로 바꿔서도 찾는다).\n"
+                     + extra})
+    msg = llm.message(messages, provider, tools=tools.SPECS)
+    text, calls = msg.get("content") or "", msg.get("tool_calls") or []
+    if calls:
+        messages.append(msg)
+        for call in calls:
+            fn = call.get("function") or {}
+            if len(log) < MAX_TOOL_CALLS + MAX_AUTO_ITEMS + 1:
+                output = tools.run(index(), fn.get("name"), fn.get("arguments"), seen)
+                log.append({"name": fn.get("name"), "arguments": fn.get("arguments"), "chars": len(output)})
+            else:
+                output = "도구 요청이 너무 많아 실행하지 않았다."
+            messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": output})
+        return final_answer(messages, provider, seen, log, extra=False), log
+    if text_tool_calls(text):
+        run_text_calls(text_tool_calls(text), messages, text, seen, log, MAX_TOOL_CALLS)
+        return final_answer(messages, provider, seen, log, extra=False), log
+    return strip_tool_markup(text), log
 
 
 # 한 번 건너 찾기: 상위 자료에 나온 다른 대상(위키 본문에 붙인 한국어 이름)의 카드를 함께 넣는다.
@@ -409,7 +531,7 @@ def answer_with(provider, question, pinned, extras, hits, strong, history=(), st
                 {"role": "user", "content": history_block(history, room) + body}]
 
     if label == "OTHER":
-        text = llm.chat(with_history(GENERAL_SYSTEM, f"{state_block(state)}[질문]\n{question}"), provider)
+        text = llm.chat(with_history(GENERAL_SYSTEM, f"{state_block(state, question)}[질문]\n{question}"), provider)
         if not text.strip():
             raise llm.LLMError("빈 답", "empty")
         return result(label, to_chat_lines(text, provider["answer_chars"]))
@@ -422,7 +544,7 @@ def answer_with(provider, question, pinned, extras, hits, strong, history=(), st
         hits = [(hits[0][0], c) for c in linked_chunks(pinned, hits, question)] + hits
     context = rag.build_context(pinned, hits, extras, budget=provider["context_chars"], cut=cut) or "(관련 자료 없음)"
     messages = with_history(ANSWER_SYSTEM + (TOOL_RULE if provider["tools"] else ""),
-                            f"{state_block(state)}[자료]\n{context}\n\n[질문]\n{question}" + refer_note(referred))
+                            f"{state_block(state, question)}[자료]\n{context}\n\n[질문]\n{question}" + refer_note(referred))
     pinned_ids = {c["id"] for c in pinned}
     used = pinned + [c for _, c in rag.relevant(hits, cut) if c["id"] not in pinned_ids]
     tool_log = []

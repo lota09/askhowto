@@ -347,6 +347,83 @@ def society():
     return out
 
 
+def enchantments():
+    """마법 부여마다 카드: 이름(한국어·영어), 설명, 어느 모드 것인지. lang의 enchantment.<모드>.<이름>(.desc).
+    ('무적 프레임이랑 빠른 크랭크 설명해줘', 11/08 — 이름·설명이 lang에 있는데 자료에 없었다)"""
+    ko, en = gamedata.langs()
+    out = []
+    for key in sorted(set(ko) | set(en)):
+        parts = key.split(".")
+        if len(parts) != 3 or parts[0] != "enchantment":
+            continue
+        name_ko, name_en = clean(ko.get(key, "")), clean(en.get(key, ""))
+        if not (name_ko or name_en) or "%" in name_ko + name_en:
+            continue
+        desc = clean(ko.get(key + ".desc") or en.get(key + ".desc") or ko.get(key + ".description") or en.get(key + ".description") or "")
+        mod = parts[1]
+        name = name_ko or name_en
+        lines = [f"마법 부여 '{name}'" + (f" ({name_en})" if name_en and name_en != name else "")
+                 + (" — 바닐라 마인크래프트" if mod == "minecraft" else f" — '{mod}' 모드")]
+        lines.append(f"효과: {desc}" if desc else "효과 설명은 게임 자료에 없다.")
+        out += chunk("enchant", f"{mod}.{parts[2]}", f"마법 부여: {name}", lines,
+                     names=[n for n in dict.fromkeys([name_ko, name_en]) if n])
+    return out
+
+
+def ores():
+    """'광석 생성 높이 (이 서버)' 요약 카드: 광석마다 가장 많이 나오는 범위 한 줄. ('금좌표', '다이아 어디서 캐')"""
+    rows = {}
+    for item_id, lines in gamedata.ore_generation().items():
+        if "deepslate_" in item_id:
+            continue  # 심층암 광석은 같은 줄이다
+        name = clean(gamedata.display_name(item_id))
+        rows[name] = "; ".join(lines[:3])
+    if not rows:
+        return []
+    lines = ["광석이 자연 생성되는 높이(Y 좌표, F3 화면의 XYZ 중 Y). 이 서버의 worldgen 자료에서 뽑았다. 심층암 광석도 같은 범위다."]
+    lines += [f"- {name}: {text}" for name, text in sorted(rows.items())]
+    return chunk("tip", "ores", "광석 생성 높이 (이 서버, 좌표·Y 높이·어디서 캐는지)", lines)
+
+
+def machines():
+    """장인 설비마다 '이 설비로 만드는 것' 카드 (수액 채취기: 원목 종류별 생산물과 기간 등).
+    설비 이름으로 물으면 확정 정보로 붙는다('나무 종류별 수액 채취기 생산물 비교해줘', 11/06)."""
+    by_machine = {}
+    for _, _, line, machine_id in gamedata.machine_recipes():
+        lines = by_machine.setdefault(machine_id, [])
+        text = line.split("에서: ", 1)[-1]
+        if text not in lines:
+            lines.append(text)
+    out = []
+    for machine_id, lines in by_machine.items():
+        name = clean(gamedata.display_name(machine_id))
+        out += chunk("machine", machine_id, f"설비 레시피: {name}", [f"{name}로 만드는 것(재료 → 생산물, 걸리는 날):"] + lines,
+                     names=aliases(name, machine_id))
+    return out
+
+
+SELL_BONUS_RE = re.compile(r"^(.+?):\s*(.+?생산품)의 가치\s*\+(\d+)%")
+
+
+def selling():
+    """'판매 가치 올리기' 카드 하나: 스킬 트리의 '○○ 생산품의 가치 +N%'와 품질 배수를 모은다.
+    ('배송상자 판매 비율 높이는 방법' 질문이 '가치'로 쓰인 스킬 자료에 닿지 않았다, 11/07)"""
+    bonus = {}
+    for c in skills():
+        for line in c["text"].split("\n"):
+            m = SELL_BONUS_RE.match(line.strip())
+            if m:
+                bonus.setdefault(m.group(2), []).append(f"{m.group(1)} +{m.group(3)}% ({c['title'].split(': ')[-1]})")
+    if not bonus:
+        return []
+    lines = ["배송 상자 판매 가격(판매가, 판매 비율, 수익)을 올리는 방법:",
+             "- 품질(별 등급): 작물·생산품에 철·금·이리듐 별이 붙으면 별 1·2·3개마다 1.25·1.5·2배로 팔린다."]
+    lines += [f"- 스킬: {kind}의 가치 " + ", ".join(items) for kind, items in bonus.items()]
+    lines.append("- 장인 설비(와인통, 저장용 병, 숙성용 나무통 등)로 가공하면 재료보다 비싸게 팔린다.")
+    lines.append("어느 아이템이 어느 생산품인지는 아이템 정보의 '판매:' 줄에 적혀 있다.")
+    return chunk("tip", "selling", "판매 가치 올리기 (배송 상자 판매가 높이기)", lines)
+
+
 def skills():
     lang = load_lang("society_skills")
     out = []
@@ -436,7 +513,8 @@ def gamerule_facts():
             lines.append(text)
     sleeping = rules.get("playersSleepingPercentage")
     if sleeping:
-        lines.append(f"접속한 플레이어의 {sleeping}%가 침대에서 자면 밤이 넘어갑니다.")
+        # '시간 빠르게 지나게 하는법'(11/08)이 이 문장에 닿게 시간 넘기기라는 말도 쓴다.
+        lines.append(f"접속한 플레이어의 {sleeping}%가 침대에서 자면 밤이 넘어갑니다(밤 건너뛰기, 시간을 빠르게 넘기는 방법).")
     return chunk("server", "gamerules", "이 서버의 게임 규칙 (게임룰)", lines)
 
 
@@ -560,6 +638,22 @@ def acquisition():
             add(item_id, f"획득: {line}")
     for item_id, line in gamedata.sell_prices().items():
         add(item_id, f"판매: {line}")
+    for item_id, line in gamedata.automation_io().items():
+        add(item_id, f"자동화: {line}")
+    names = gamedata.names()
+    for item_id, lines in gamedata.ore_generation().items():
+        for line in lines:
+            add(item_id, f"자연 생성(광석 높이·몇 층): {line}")
+        # 광석에서 나오는 아이템 카드에도 붙인다('다이아몬드는 몇 층에서 캐?'가 광석 카드에 닿지 않았다, 11/09)
+        ns, path = item_id.split(":")
+        base = re.sub(r"^(deepslate_|nether_)|_ore$", "", path)
+        base = re.sub(r"^(deepslate_|nether_)", "", base)
+        ore_name = clean(gamedata.display_name(item_id))
+        for drop in (f"{ns}:{base}", f"{ns}:raw_{base}", f"minecraft:{base}", f"minecraft:raw_{base}"):
+            if drop != item_id and drop in names and "deepslate_" not in path:
+                for line in lines:
+                    add(drop, f"캐는 곳: {ore_name} — {line}")
+                break
     for item_id, seasons in gamedata.crop_seasons().items():
         add(item_id, f"제철(자라는 계절): {', '.join(seasons)}")
     by_ko = {}
@@ -611,6 +705,13 @@ MAX_RECIPES_PER_ITEM = 3
 MAX_USES_PER_ITEM = 8
 
 
+def write_categories():
+    """묶음 이름 -> 아이템 ID들 (data/categories.json). rag.Index.category_card가 쓴다."""
+    table = {w: sorted(ids) for w, ids in gamedata.categories().items()}
+    config.CATEGORIES_FILE.write_text(json.dumps(table, ensure_ascii=False), encoding="utf-8")
+    return len(table)
+
+
 def write_recipe_facts():
     """아이템별 제작법·쓰임새(data/recipes.jsonl). 서버 레시피 덤프가 없으면 파일을 지운다
     (레시피를 모르는데 '만들 수 없다'고 답하면 안 되므로)."""
@@ -619,6 +720,8 @@ def write_recipe_facts():
         config.RECIPE_FACTS_FILE.unlink(missing_ok=True)
         return 0
     drops = gamedata.loot_sources()
+    removed = gamedata.removed_recipes()
+    sell = gamedata.sell_values()
     with open(config.RECIPE_FACTS_FILE, "w", encoding="utf-8") as f:
         for item_id, entry in sorted(gamedata.names().items()):
             if entry.get("kind") not in ("item", "block"):
@@ -628,7 +731,12 @@ def write_recipe_facts():
             f.write(json.dumps({"id": item_id, "make": facts["make"][:MAX_RECIPES_PER_ITEM],
                                 "uses": uses[:MAX_USES_PER_ITEM], "uses_total": len(uses),
                                 # 전리품 테이블(몹·블록 드롭, 구조물 상자, 낚시). get_item 도구와 제작법 카드에 쓴다.
-                                "drops": drops.get(item_id, [])},
+                                "drops": drops.get(item_id, []),
+                                # 모드 기본 제작법 중 이 팩이 지운 것 ('원래 아연으로 만들지 않았나?' 질문용)
+                                # (같은 레시피를 다른 ID로 다시 넣은 것은 지운 게 아니다: 화로)
+                                "removed": [r for r in removed.get(item_id, []) if r not in facts["make"]][:2],
+                                # 배송 상자 기본 판매가 (플레이어 인벤토리 가치 계산용)
+                                "sell": sell.get(item_id)},
                                ensure_ascii=False) + "\n")
     return len(table)
 
@@ -636,7 +744,7 @@ def write_recipe_facts():
 def build():
     chunks, seen = [], set()
     # 위키는 맨 뒤에 둔다: 같은 이름에 서버 자료 조각이 있으면 그쪽이 먼저 확정 정보로 고정된다.
-    sources = [quests, patchouli, acquisition, mod_items, npcs, coins, society, skills, tips, server_facts, manual,
+    sources = [quests, patchouli, acquisition, mod_items, machines, enchantments, npcs, coins, society, skills, selling, ores, tips, server_facts, manual,
                wiki_docs]
     for c in [c for source in sources for c in source()]:
         # 제목만 있는 퀘스트처럼 내용이 같은 조각은 하나만 남긴다. 이름이 다르면(수박 조각/수박씨) 따로 둔다.
@@ -650,7 +758,7 @@ def build():
         for c in chunks:
             f.write(json.dumps(c, ensure_ascii=False) + "\n")
     write_names()
-    counts = {"recipes": write_recipe_facts(), "biomes": write_places()}
+    counts = {"recipes": write_recipe_facts(), "biomes": write_places(), "categories": write_categories()}
     for c in chunks:
         counts[c["source"]] = counts.get(c["source"], 0) + 1
     return len(chunks), counts

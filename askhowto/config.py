@@ -23,6 +23,13 @@ PRICES_FILE = Path(os.environ.get("ASKHOWTO_PRICES_FILE", QUEUE_DIR / "prices.js
 
 DATA_DIR = ROOT / "data"
 CHUNKS_FILE = DATA_DIR / "chunks.jsonl"
+# 서버를 켜지 않고 KubeJS startup_scripts를 Rhino로 실행해 뽑은 전역 표(장인 설비 레시피, 판매가). tools_offline/ 참고.
+STARTUP_DUMP_FILE = DATA_DIR / "startup_dump.json"
+# 묶음 이름(태그의 한국어 이름) -> 아이템 ID들 ('갑옷' -> 철 흉갑 …)
+CATEGORIES_FILE = DATA_DIR / "categories.json"
+_HOME_JDK = Path.home() / ".local/jdk/jdk-17.0.21+9/bin"
+_SYS_JDK = Path("/usr/lib/jvm/java-17-openjdk-arm64/bin")  # apt openjdk-17-jdk-headless
+JDK_BIN = Path(os.environ.get("ASKHOWTO_JDK_BIN", str(_HOME_JDK if (_HOME_JDK / "javac").exists() else _SYS_JDK)))
 NAMES_FILE = DATA_DIR / "names.jsonl"
 # 아이템별 제작법·쓰임새 (검색 색인에는 넣지 않고, 질문에 이름이 나왔을 때만 붙인다)
 RECIPE_FACTS_FILE = DATA_DIR / "recipes.jsonl"
@@ -64,7 +71,8 @@ PROVIDERS = {
     # 무료. 89문항 분류 89/89, 사실 29/31, 중앙값 5.8초 (가끔 70초). 추론을 끌 수 없다.
     "nim": _provider("nim", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", "z-ai/glm-5.3-flash",
                      reasoning="low", classify_reasoning="low", context_chars=12000, top_k=20, max_tokens=2000,
-                     timeout=40, retries=1, tools=True),
+                     # 시간 제한 30초: 성공한 호출도 28초까지 걸린 적이 있다(11/06). 실패하면 bot.COOLDOWN으로 5분간 건너뛴다.
+                     timeout=30, retries=1, tools=True),
     # 무료 등급. 빠르지만 분당 한도에 자주 걸린다(429면 바로 다음 서비스로).
     # 3.1-flash-lite가 혼잡(503)이거나 가끔 50초 가까이 걸려서, 한도가 따로인 3.5-flash-lite를 예비로 둔다(11/03).
     # 시간 제한 15초: 11/04 밤에 3.1-lite가 30초를 다 쓰고 끊긴 뒤 예비 모델이 1~2초 만에 답한 일이 잦았다.

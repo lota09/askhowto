@@ -9,6 +9,8 @@ data/names.jsonl
 data/recipes.jsonl
 data/places.json
 data/wiki/raw.json
+data/categories.json
+data/startup_dump.json
 # 평가 결과·큐·도구 출력, 서버 경로 링크
 runs/
 links/

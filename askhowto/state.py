@@ -72,6 +72,7 @@ def _describe(raw, index):
         inventory.sort(key=lambda s: -(s.get("count") or 0))
         lines.append("인벤토리(많은 순): " + ", ".join(f"{item_name(index, s['id'])} {s.get('count', 1)}개"
                                                    for s in inventory[:MAX_INVENTORY]))
+    value = _inventory_value(raw, index)
     when = []
     if raw.get("day") is not None:
         when.append(f"{int(raw['day'])}일 차")
@@ -94,4 +95,23 @@ def _describe(raw, index):
     words = [SEASONS[raw["season"]]] if raw.get("season") in SEASONS else []
     if raw.get("biome"):
         words.append(_place(raw["biome"]))
-    return {"held_name": held, "text": "\n".join(lines), "search_words": words}
+    return {"held_name": held, "text": "\n".join(lines), "search_words": words, "value_text": value}
+
+
+def _inventory_value(raw, index):
+    """인벤토리(손에 든 것 포함)의 배송 상자 기본 판매가 합계 글. 판매가를 모르면 빈 글.
+    '내 인벤토리 가치 합한 값 알려줘'(11/04)에 계산해서 답하게 한다. 질문이 값·가치를 물을 때만 넣는다(bot.VALUE_RE)."""
+    facts = index.recipe_facts or {}
+    counts = {}
+    for stack in [raw.get("mainhand"), raw.get("offhand")] + list(raw.get("inventory") or []):
+        if isinstance(stack, dict) and stack.get("id"):
+            counts[stack["id"]] = counts.get(stack["id"], 0) + int(stack.get("count") or 1)
+    priced = [(i, n, (facts.get(i) or {}).get("sell")) for i, n in counts.items()]
+    sellable = sorted(((i, n, v) for i, n, v in priced if v), key=lambda x: -x[1] * x[2])
+    if not sellable:
+        return ""
+    total = sum(n * v for _, n, v in sellable)
+    parts = [f"{item_name(index, i)} {n}개×{v:,}={n * v:,}" for i, n, v in sellable[:MAX_INVENTORY]]
+    unsold = len(priced) - len(sellable)
+    return (f"인벤토리 판매가(배송 상자 기본값, 품질·스킬 배수 빼고): 합계 코인 {total:,} / " + ", ".join(parts)
+            + (f" / 판매가 없는(팔 수 없는) 아이템 {unsold}종" if unsold else ""))

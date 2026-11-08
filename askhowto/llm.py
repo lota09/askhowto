@@ -23,6 +23,8 @@ KIND_KO = {"limit": "사용 한도 초과", "timeout": "시간 초과", "server"
 USAGE = {"calls": 0, "prompt": 0, "completion": 0}
 # 마지막으로 답한 모델 (예비 모델이 답했을 수 있다. 로그에 실제 모델을 적으려고)
 LAST = {"model": None, "truncated": False}
+# 이번 질문의 LLM 호출마다 (모델, 걸린 초, 결과). 어느 호출이 느린지 로그로 보려고(11/07).
+CALLS = []
 
 
 def chat(messages, provider, max_tokens=None, temperature=0.2, reasoning=None):
@@ -71,6 +73,7 @@ def _request(provider, payload, headers):
     body = json.dumps(payload, ensure_ascii=False).encode()
     last = None
     for attempt in range(provider["retries"]):
+        started = time.time()
         try:
             req = urllib.request.Request(provider["url"] + "/chat/completions", data=body, headers=headers)
             with urllib.request.urlopen(req, timeout=provider["timeout"]) as r:
@@ -81,6 +84,7 @@ def _request(provider, payload, headers):
             USAGE["completion"] += usage.get("completion_tokens") or 0
             # 출력 한도에 걸려 끊긴 답인지 (부른 쪽이 '잘림' 표시를 붙인다)
             LAST["truncated"] = data["choices"][0].get("finish_reason") == "length"
+            CALLS.append([payload["model"], round(time.time() - started, 1), "ok"])
             return data["choices"][0]["message"]
         except urllib.error.HTTPError as e:
             detail = e.read()[:200].decode("utf-8", "replace")
@@ -97,6 +101,7 @@ def _request(provider, payload, headers):
             last = LLMError(f"{type(e).__name__}: {e}", kind)
         except (ValueError, KeyError) as e:
             last = LLMError(f"{type(e).__name__}: {e}", "server")
+        CALLS.append([payload["model"], round(time.time() - started, 1), last.kind])
         if attempt + 1 < provider["retries"]:
             time.sleep(provider.get("retry_wait", 1) * (attempt + 1))
     raise last

@@ -53,6 +53,8 @@ def search_docs(index, query, seen=()):
     """seen: 이미 [자료]로 넣은 조각 ID들 (같은 내용을 다시 주지 않는다)."""
     pinned, extras = index.match_names(query)
     english = [n for c in pinned for n in c.get("names", [])[1:] if n.isascii()] + [e.get("en", "") for e in extras]
+    # 영어 검색어('enchant')는 한국어 이름('마법 부여대')으로도 찾는다. 서버 자료는 한국어다.
+    english += index.english_terms(query)
     hits = index.search(" ".join([query] + english), k=SEARCH_RESULTS * 2,
                         names=[c["names"][0] for c in pinned if c.get("names")])
     chunks = [c for c in pinned] + [c for _, c in rag.relevant(hits, rag.WIDE_RELATIVE_CUT)]

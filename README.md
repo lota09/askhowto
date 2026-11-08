@@ -73,6 +73,10 @@
 | `config/sereneseasons/*.toml` | 이 서버의 계절 길이, 제철 아닌 작물 처리 방식 |
 | `world/level.dat` 게임룰 | 불 번짐, 죽으면 아이템 유지(keepInventory), 팬텀, 수면 비율 등 → "이 서버의 게임 규칙" |
 | `local/askhowto/recipes.json` (서버 시작 때 `kubejs/askhowto_recipes.js`가 덤프) | 최종 레시피 약 2만 개 (KubeJS 추가·삭제 반영) → `data/recipes.jsonl` 아이템별 "만드는 법", "재료로 쓰이는 곳". 검색 색인에는 넣지 않는다 |
+| `kubejs/startup_scripts` 전체를 서버 밖에서 Rhino로 실행 (`tools_offline/DumpStartup.java`, 결과 `data/startup_dump.json`) | 장인 설비 19종 레시피(`global.artisanMachineDefinitions`: "와인통에서: 사과 3개 → 사과 와인 1개 (약 6일)", "수액 채취기에서: 참나무 원목에 붙이면 약 5일마다 → 참나무 수지 1개") → 제작법 자료와 "설비 레시피: <설비>" 카드. 판매가 표(`global.trades`)도 여기서 얻는다(서버 덤프와 1,997개 모두 같음). 서버를 재시작하지 않아도 스크립트가 바뀌면 반영된다 |
+| 모드 jar 레시피 − 서버 최종 레시피 | 이 팩이 지운 모드 기본 제작법 → "이 서버에서 지운 모드 기본 제작법(이 방법으로는 못 만듦)" |
+| 태그(모드 jar·바닐라 `data/*/tags/items`) + 태그의 한국어 이름(`tag.item.*`) | 묶음 이름 → 아이템(`data/categories.json`, '갑옷' → 철 흉갑 …). 이름을 못 찾고 만들기·업그레이드를 물으면 묶음 제작법 카드 |
+| KubeJS 블록의 `CapabilityBuilder.ITEM` | "자동화: 호퍼·파이프로 아이템을 넣을·뺄 수 있음" |
 | `local/askhowto/prices.json` (서버 시작 때 `kubejs/askhowto_prices.js`가 `global.trades`를 덤프) | 배송 상자 판매가 → "판매: 배송 상자에 넣어 팔면 코인 24 (품질 별 1·2·3개면 1.25·1.5·2배…)" |
 | `docs/manual/*.md` | 직접 쓴 문서. `#` 제목 하나가 검색 단위 |
 | `data/vanilla/ko_kr.json`(Mojang 에셋 서버, SHA1 확인), 서버 jar의 `en_us.json`, 모드 jar의 `en_us`·`ko_kr`, `kubejs/assets` lang | 이름 사전 `data/names.jsonl` (아이템·블록·몹·효과 약 1만9천 개, 한/영 + ID 별칭) |
@@ -80,6 +84,12 @@
 상점·슬라임·판매가·가축·제철 정보는 아이템별로 모아 "아이템 정보: <이름>" 카드 하나로 만든다(`build_docs.acquisition`).
 
 서버 설정 파일 경로를 안내하는 퀘스트 같은 운영 정보는 빼고 만든다.
+
+**자동 갱신:** 사이드카는 5분마다 서버 덤프(`recipes.json`, `prices.json`)와 `kubejs/startup_scripts`가 자료보다 새로운지 보고,
+새로우면(마지막으로 바뀐 지 90초 뒤) 따로 `build`를 돌린 뒤 색인을 다시 읽는다(`worker.check_rebuild`, 기록은 `logs/build.log`).
+
+**서비스 건너뛰기:** 기본 순서(NIM → Gemini → 로컬)에서 시간 초과·한도·혼잡으로 실패한 서비스는 5분 동안 뒤로 미룬다(`bot.COOLDOWN`).
+LLM 호출마다 [모델, 초, 결과]를 `qa.jsonl`의 `calls`에 남긴다.
 
 **자료 추가하기:** `docs/manual/`에 `.md` 파일을 만들고 `# 제목` 아래에 내용을 쓴 뒤 `python3 -m askhowto build`, 사이드카 재시작.
 틀린 답은 `logs/feedback.jsonl`(플레이어가 [도움안됨]을 누른 질문·답·자료)과 `logs/qa.jsonl`(전체 기록)에서 찾는다.
@@ -123,10 +133,12 @@
   질문에 "지금/현재/여기" 같은 말이 있으면 계절·바이옴 이름도 검색어에 더한다.
 - **팀 공유** (KubeJS만): 답이 오면 같은 FTB Teams 파티(혼자인 개인 팀 제외), 없으면 스코어보드 팀의 접속 중인 팀원에게 "OO님의 질문: …"과 같은 답을 보낸다.
   평가 버튼은 질문한 사람만 받는다. `/askteam on|off`로 받기를 끈다(플레이어 데이터에 저장).
-- **LLM 호출 최대 2번** (`bot.call_with_tools`, 도구를 쓰는 NIM·Gemini): 분류 호출 없이
+- **LLM 호출 보통 최대 2번, 예외적으로 3번** (`bot.call_with_tools`, 도구를 쓰는 NIM·Gemini): 분류 호출 없이
   1. 검색 자료로 답한다. 모자라면 모델이 도구를 요청한다: `search_docs`(서버 자료+위키 검색), `read_page`(위키 섹션), `get_item`(아이템 하나의 설명·구매처·드롭·제작법·쓰임새·같은 계열).
   2. 도구 결과로 답한다. 모델이 도구 없이 '모른다'고 답했으면 사이드카가 질문 속 대상마다 `get_item`과 이름을 붙인 `search_docs`를 대신 돌려 넣고 다시 답하게 한다.
   웹 검색은 넣지 않았다(무료 Gemini 구글 검색은 막혀 있고, 일반 검색은 API 키가 필요. 11/03 사용자 결정으로 2단계까지만).
+  3. 2번째 호출에서도 모델이 도구를 더 원하면(glm은 이때 `<tool_call>…` 글을 쓴다) 그 도구를 실행하고 한 번 더 답하게 한다(11/07 사용자 결정 A).
+     도구 호출 글은 채팅에 나가지 않게 지운다(`bot.text_tool_calls`, `bot.final_answer`).
   로컬 Gemma는 도구 없이 분류 + 답 2번. 호출 기록은 `worker.log`의 `tool:` 줄과 `qa.jsonl`의 `tools`.
 - **공식 위키** (`wiki.py`): https://sunlitvalley.miraheze.org (영어, CC BY-SA 4.0) 일반 문서 129개를 영어 원문 그대로 섹션 조각으로 넣는다.
   - 넘겨주기, Cobblemon(같은 위키의 다른 팩), 운영 문서, 10만 자 넘는 표 문서는 뺀다.

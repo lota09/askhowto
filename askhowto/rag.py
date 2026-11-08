@@ -86,6 +86,28 @@ FUZZY_MIN_LEN = 3
 FUZZY_MAX_LEN = 8
 SUFFIX_MAX_NAMES = 3
 SUFFIX_MAX_DF = 50
+EN_TERM_MAX_NAMES = 60
+MAX_CATEGORY_ROWS = 14
+# 묶음 카드는 만들기·업그레이드를 직접 물을 때만('물고기 종류', '작물을 파는 방법'에는 붙이지 않는다)
+UPGRADE_INTENT_RE = re.compile(r"업그레이드|강화|티어|등급|단계|상위|윗\s*단계")
+CATEGORY_INTENT_RE = re.compile(r"만들|만드|제작|조합|레시피|크래프|" + UPGRADE_INTENT_RE.pattern)
+
+
+EN_SUFFIXES = ("ments", "ment", "ings", "ing", "ers", "er", "ed", "es", "s")
+
+
+def is_intent_word(key):
+    """'업그레이드', '강화', '제작'처럼 질문의 의도를 나타내는 말 자체인 이름. 이런 이름(Refined Storage의 '업그레이드')을
+    고정하면 '갑옷 업그레이드 어떻게 해?'에 엉뚱한 아이템 카드가 붙었다(11/04)."""
+    return any(r.fullmatch(key) for r in (MAKE_INTENT_RE, USE_INTENT_RE, FAMILY_INTENT_RE))
+
+
+def en_stem(word):
+    """영어 낱말의 어근: enchanting·enchanted·enchantment -> enchant (위키는 영어 원문이라 형태가 달라도 맞춘다, 11/07)."""
+    for suffix in EN_SUFFIXES:
+        if word.endswith(suffix) and len(word) - len(suffix) >= 4:
+            return word[:-len(suffix)]
+    return word
 
 
 def tokenize(text, query=False):
@@ -99,7 +121,7 @@ def tokenize(text, query=False):
             out += [word[i:i + 2] for i in range(len(word) - 1)]
             out += ["1:" + ch for ch in word]
         else:
-            out.append(word)
+            out.append(en_stem(word) if word.isascii() and word.isalpha() else word)
     return out
 
 
@@ -176,6 +198,7 @@ class Index:
         self.chunks = chunks
         # 아이템 ID -> 제작법·쓰임새 (data/recipes.jsonl). None이면 서버 레시피 덤프가 없어 모르는 것이다.
         self.recipe_facts = recipe_facts
+        self.categories = {}  # 묶음 이름 -> 아이템 ID들 (load가 채운다)
         self.docs = []
         df = Counter()
         self.word_df = Counter()  # 조사 뗀 한글 단어의 문서 빈도 (개념어 판별용)
@@ -196,7 +219,7 @@ class Index:
         for i, c in enumerate(chunks):
             for name in c.get("names", []):
                 key = re.sub(r"\s+", "", name.lower())
-                if not key or (key.isascii() and len(key) < 4):
+                if not key or (key.isascii() and len(key) < 4) or is_intent_word(key):
                     continue
                 # 위키 문서 제목을 옮긴 한국어 이름이 흔한 말('작물', '가을')이면 그 말이 나올 때마다
                 # 위키 문서가 고정돼 버린다. 사전 이름과 같은 개념어 규칙으로 뺀다.
@@ -213,7 +236,7 @@ class Index:
         for entry in sorted(dictionary, key=lambda e: not e["id"].startswith("minecraft:")):
             for name in (entry.get("ko"), entry.get("en"), entry.get("alias")):
                 key = re.sub(r"\s+", "", (name or "").lower())
-                if (not key or key in by_name or key in by_key or self.word_df[key] >= CONCEPT_WORD_DF
+                if (not key or key in by_name or key in by_key or self.word_df[key] >= CONCEPT_WORD_DF or is_intent_word(key)
                         or (key.isascii() and len(key) < 4) or (not key.isascii() and len(key) < 2)):
                     continue
                 by_key[key] = entry
@@ -226,6 +249,23 @@ class Index:
             if FUZZY_MIN_LEN <= len(key) <= FUZZY_MAX_LEN and all("가" <= ch <= "힣" for ch in key):
                 self.fuzzy_keys.setdefault(len(key), []).append(key)
         self.dict_by_key = by_key
+        # 영어 낱말 어근 -> 그 낱말이 들어간 영어 이름을 가진 항목의 한국어 이름들 (english_terms용)
+        self.en_words = {}
+        for entry in dictionary:
+            english = entry.get("en") or entry.get("alias") or ""  # 영어 이름이 없는 KubeJS 아이템은 ID 별칭('tapper')
+            if entry.get("ko") and english and entry.get("kind") in ("item", "block"):
+                for w in set(re.findall(r"[a-z]{4,}", english.lower())):
+                    names = self.en_words.setdefault(en_stem(w), [])
+                    if entry["ko"] not in names:
+                        names.append(entry["ko"])
+        # 여러 이름의 공통 뒷말('철 스프링클러', '금 스프링클러' -> '스프링클러'): 그 말 자체는 이름이 아니어도 계열로 찾는다.
+        tails = Counter()
+        for entry in dictionary:
+            words = (entry.get("ko") or "").split()
+            if len(words) >= 2 and entry.get("kind") in ("item", "block") and re.fullmatch(r"[가-힣]{3,8}", words[-1]):
+                tails[words[-1]] += 1
+        self.tails = {w for w, n in tails.items() if n >= 2 and w not in by_key and w not in self.by_name
+                      and self.word_df[w] < SUFFIX_MAX_DF and not is_intent_word(w)}
         # 뒷부분 맞추기용: 마지막 글자 -> 한글로만 된 이름들
         self.suffix_keys = {}
         for key in list(self.by_name) + list(by_key):
@@ -312,9 +352,66 @@ class Index:
                 chunks[chunks.index(same)] = dict(same, text=same["text"] + "\n" + card["text"], has_recipe=True)
             else:
                 chunks.append(card)
+        if not chunks and not extras:
+            card = self.tail_card(question) or self.category_card(q)
+            if card:
+                chunks.append(card)
         chunks = list({c["id"]: c for c in chunks}.values())
         extras = list({e["id"]: e for _, _, e in extras}.values())
         return chunks, extras
+
+    def tail_card(self, question):
+        """이름은 못 찾았는데 여러 아이템의 공통 뒷말('스프링클러', 오타 '스프링쿨러'도)이 있으면 그 계열의 제작법 카드.
+        만들기·업그레이드를 직접 물을 때만, 문서에 흔한 말('물고기')은 빼고."""
+        if not CATEGORY_INTENT_RE.search(question):
+            return None
+        for w in re.findall(r"[가-힣]+", question.lower()):
+            word = re.sub(rf"(?:{JOSA})$", "", w) or w
+            for cand in (word, w):
+                tail = cand if cand in self.tails else next(
+                    (t for t in self.tails if len(t) == len(cand) >= 4 and name_distance(cand, t) <= FUZZY_MAX_DISTANCE), None)
+                if tail:
+                    return self.recipe_card(tail, question)
+        return None
+
+    def category_card(self, q):
+        """이름은 못 찾았는데 묶음 이름('갑옷')으로 만들기·업그레이드를 물으면 그 묶음 아이템들의 제작법 카드.
+        업그레이드를 물으면 대장장이 작업대처럼 이전 등급을 재료로 쓰는 제작법을 먼저 보여준다."""
+        if not self.recipe_facts or not CATEGORY_INTENT_RE.search(q):
+            return None
+        word = next((w for w in re.findall(r"[가-힣]+", q)
+                     if (re.sub(rf"(?:{JOSA})$", "", w) or w) in self.categories), None)
+        if not word:
+            return None
+        word = re.sub(rf"(?:{JOSA})$", "", word) or word
+        rows = []
+        for item_id in self.categories[word]:
+            facts = self.recipe_facts.get(item_id) or {}
+            entry = self.dict_by_id.get(item_id) or {}
+            name = entry.get("ko") or entry.get("en")
+            if name and facts.get("make"):
+                make = facts["make"][0]
+                # 재료에 같은 묶음의 다른 아이템이 들어 있으면 업그레이드 제작법이다(철 흉갑 = 사슬 흉갑 + 형판 + 철 주괴).
+                upgrade = any((self.dict_by_id.get(o) or {}).get("ko", "-") in make for o in self.categories[word] if o != item_id)
+                rows.append((not upgrade if UPGRADE_INTENT_RE.search(q) else 0, name, make))
+        if not rows:
+            return None
+        rows.sort()
+        if len(rows) > MAX_CATEGORY_ROWS:
+            # 재료(이름 첫 낱말)마다 하나만: '금 흉갑/금 투구/…'를 다 넣으면 등급 단계가 잘린다.
+            seen, picked = set(), []
+            for row in rows:
+                material = row[1].split()[0]
+                if material not in seen:
+                    seen.add(material)
+                    picked.append(row)
+            rows, note = picked, [f"(재료마다 대표 하나만 적었다. 같은 재료의 다른 {word}도 같은 방식으로 만든다)"]
+        else:
+            note = []
+        lines = [f"{name}: {make}" for _, name, make in rows[:MAX_CATEGORY_ROWS]] + note
+        more = f" 외 {len(rows) - MAX_CATEGORY_ROWS}개" if len(rows) > MAX_CATEGORY_ROWS else ""
+        return {"id": f"category:{word}", "source": "recipe", "title": f"'{word}' 종류의 제작법 (이 서버 레시피{more})",
+                "text": "\n".join(lines), "names": [word], "matched": word}
 
     def senses_card(self, surface, idxs):
         """한 이름이 여러 종류(마을 NPC, 블록, 아이템, 생물 …)를 가리키면 그 사실을 알려 주는 확정 정보 조각.
@@ -333,6 +430,29 @@ class Index:
         return {"id": f"senses:{name}", "source": "senses", "title": f"'{name}'은(는) 여러 대상을 가리키는 이름",
                 "text": "\n".join(lines) + "\n질문 맥락(마을·주민이면 NPC, 설치·장식이면 블록 등)에 맞는 대상을 골라 답한다. "
                         "맥락으로 알 수 없으면 각각 한 줄씩 짧게 설명한다.", "matched": name}
+
+    def english_terms(self, text):
+        """질문·검색어 속 영어 낱말을 사전의 영어 이름으로 한국어 낱말에 잇는다 -> 한국어 낱말들.
+        'enchant' -> Enchanting Table, Enchanted Book … -> 그 한국어 이름들에 절반 넘게 들어가는 낱말('마법', '부여').
+        이름이 몇 개뿐이면 이름 그대로. 낱말이 이름 수백 개에 쓰이면(흔한 말 'iron') 뺀다."""
+        out = []
+        for word in set(re.findall(r"[a-z]{4,}", text.lower())):
+            names = self.en_words.get(en_stem(word), ())
+            if not names or len(names) > EN_TERM_MAX_NAMES:
+                continue
+            if len(names) <= 3:
+                terms = list(names)
+            else:
+                # 이름들에 낱말로 든 말(조사 뗀 것 포함) 중 이름의 절반 넘게에 들어 있는 것.
+                # ('마법이 부여된 책', '마법나무 선로', '마법 부여대' -> '마법')
+                words = {w for n in names for w in set(re.findall(r"[가-힣]{2,}", n)) | word_stems(n) if len(w) >= 2}
+                presence = sorted(((sum(w in n for n in names), w) for w in words), key=lambda x: (-x[0], -len(x[1])))
+                terms = []
+                for c, w in presence:
+                    if c > len(names) / 2 and not any(w in t for t in terms) and len(terms) < 2:
+                        terms.append(w)
+            out += [t for t in terms if t not in out]
+        return out
 
     def suffix_matches(self, q, taken):
         """이름의 뒷부분만 쓴 단어('통발' -> '게잡이 통발')를 그 이름과 맞춘다 -> [(위치, 이름 키, 질문 속 표기)].
@@ -415,16 +535,27 @@ class Index:
         if not (want_make or want_use or want_family):
             return None
         ids = [i for i in self.ids_by_key.get(key, []) if i in self.recipe_facts]
+        members = self.family(key)[:MAX_FAMILY]
         if not ids:
-            return None
+            # 그 이름의 아이템은 없고 계열만 있다('스프링클러' -> 철·금·다이아몬드 스프링클러): 계열 제작법만 보여준다.
+            if not members:
+                return None
+            lines = [f"'{key}'라는 아이템 자체는 없고, 같은 계열 아이템이 있다: {', '.join(m for m, _ in members)}"]
+            for member, member_ids in members:
+                make = list(dict.fromkeys(m[0] for i in member_ids if (m := (self.recipe_facts.get(i) or {}).get("make"))))
+                lines.append(f"{member} 만드는 법: {' / '.join(make[:2])}" if make else f"{member}: 조합으로 못 만듦")
+            return {"id": f"recipe:{key}", "source": "recipe", "title": f"제작법·쓰임새: {key} 계열",
+                    "text": "\n".join(lines), "names": [key], "matched": key}
         entry = self.dict_by_id[ids[0]]
         name = entry.get("ko") or entry.get("en") or entry["alias"]
         facts = [self.recipe_facts[i] for i in ids]
         lines = []
-        members = self.family(key)[:MAX_FAMILY]
         if want_make or want_family:
             make = list(dict.fromkeys(l for f in facts for l in f["make"]))[:3]
             lines += [f"만드는 법: {l}" for l in make] or ["만드는 법: 이 서버에서는 조합·가공으로 만들 수 없음"]
+            removed = list(dict.fromkeys(r for f in facts for r in f.get("removed", [])))[:2]
+            if removed:
+                lines.append("이 서버에서 지운 모드 기본 제작법(이 방법으로는 못 만듦): " + " / ".join(removed))
             drops = list(dict.fromkeys(d for f in facts for d in f.get("drops", [])))
             if drops:
                 lines.append("전리품으로 얻기(모드 기본값): " + ", ".join(drops))
@@ -463,7 +594,10 @@ class Index:
         if config.RECIPE_FACTS_FILE.exists():
             with open(config.RECIPE_FACTS_FILE, encoding="utf-8") as f:
                 recipe_facts = {d["id"]: d for d in map(json.loads, f)}
-        return cls(chunks, dictionary, recipe_facts)
+        index = cls(chunks, dictionary, recipe_facts)
+        if config.CATEGORIES_FILE.exists():
+            index.categories = json.loads(config.CATEGORIES_FILE.read_text(encoding="utf-8"))
+        return index
 
     def search(self, query, k=config.SEARCH_K, unigram_weight=UNIGRAM_WEIGHT, names=(), skip_sources=()):
         """BM25. unigram_weight=0이면 2글자 단위만 본다(게임 용어가 실제로 걸렸는지 판단할 때).

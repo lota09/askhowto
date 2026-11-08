@@ -11,6 +11,8 @@ status.json         (여기서 씀)    {time, busy, queue} — KubeJS가 사이�
 """
 import json
 import os
+import subprocess
+import sys
 import time
 import traceback
 from collections import OrderedDict
@@ -118,6 +120,8 @@ def handle(path, req, queue_left):
         "sources": res["refs"], "seconds": round(elapsed, 1),
         "choice": choice, "provider": res.get("provider"), "model": res.get("model"), "fallbacks": res.get("fallbacks", []),
         "tools": res.get("tools", []), "referred": res.get("referred", []), "memory_turns": len(history),
+        # LLM 호출마다 [모델, 초, 결과] (어디가 느린지 보려고)
+        "calls": llm.CALLS[:],
         "state": player_state["text"] if player_state else None,
         # 이 질문에 쓴 토큰 (분류 + 답변). 월 사용량·비용 확인용
         "tokens": {k: llm.USAGE[k] - before[k] for k in ("calls", "prompt", "completion")},
@@ -144,6 +148,47 @@ def collect_feedback():
             "sources": qa.get("sources"),
         })
         log(f"feedback {fb.get('vote')} from {fb.get('player')}: {qa.get('question')!r}")
+
+
+# 서버가 재시작하면서 새로 쓴 덤프(레시피·판매가·장인 설비)가 자료보다 새로우면 자료를 다시 만들고 색인을 다시 읽는다.
+# 11/06 판매가 덤프가 생겼는데 아무도 build를 안 해서 하루 넘게 자료에 안 들어갔다.
+REBUILD_CHECK_INTERVAL = 300
+REBUILD_SETTLE_SECONDS = 90  # 서버가 덤프를 차례로 쓰는 중일 수 있어서, 마지막으로 쓴 뒤 이만큼 지나면 만든다
+rebuild = {"proc": None, "tried": None, "checked": 0}
+
+
+def dump_files():
+    """자료의 원본 중 바뀔 수 있는 것: 서버 덤프 파일들과 KubeJS 시작 스크립트(설비 레시피·판매가 표)."""
+    files = [p for p in (config.RECIPES_FILE, config.PRICES_FILE) if p.exists()]
+    return files + list((config.SERVER_DIR / "kubejs" / "startup_scripts").rglob("*.js"))
+
+
+def check_rebuild():
+    """쉬는 동안 불린다. 다시 만들 때가 되면 build를 따로 띄우고, 끝나면 색인을 다시 읽는다."""
+    proc = rebuild["proc"]
+    if proc is not None:
+        if proc.poll() is None:
+            return
+        rebuild["proc"] = None
+        if proc.returncode == 0:
+            bot.reload_index()
+            bot.index()
+            log("자료 다시 만듦 -> 색인 다시 읽음")
+        else:
+            log(f"자료 다시 만들기 실패 (exit {proc.returncode}), logs/build.log 확인")
+        return
+    if time.time() - rebuild["checked"] < REBUILD_CHECK_INTERVAL:
+        return
+    rebuild["checked"] = time.time()
+    built = config.CHUNKS_FILE.stat().st_mtime if config.CHUNKS_FILE.exists() else 0
+    newest = max((p.stat().st_mtime for p in dump_files()), default=0)
+    if newest <= built or time.time() - newest < REBUILD_SETTLE_SECONDS or rebuild["tried"] == newest:
+        return
+    rebuild["tried"] = newest  # 실패해도 같은 덤프로 계속 다시 하지 않는다
+    log("서버 덤프가 자료보다 새로움 -> 자료 다시 만드는 중")
+    out = open(config.ROOT / "logs" / "build.log", "w")
+    rebuild["proc"] = subprocess.Popen([sys.executable, "-m", "askhowto", "build"], cwd=config.ROOT,
+                                       stdout=out, stderr=subprocess.STDOUT)
 
 
 def serve():
@@ -176,5 +221,6 @@ def serve():
             heartbeat(False, 0)
             cleanup_responses()
             collect_feedback()
+            check_rebuild()
             last_beat = time.time()
         time.sleep(config.POLL_INTERVAL)

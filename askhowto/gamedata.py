@@ -7,6 +7,7 @@
 """
 import json
 import re
+import subprocess
 import zipfile
 
 from . import config
@@ -270,6 +271,17 @@ def shop_sources():
 
 # 레시피 종류 -> 쓰는 기계·작업대 블록 ID (이름은 lang에서 가져온다). 여기 없으면 종류 ID가 블록 ID인지 보고, 아니면 ID를 그대로 쓴다.
 RECIPE_STATIONS = {
+    # 팩 스크립트가 추가한 제작대 레시피(이름이 'kubejs:shaped에서'로 나왔다, 11/07)
+    "kubejs:shaped": "minecraft:crafting_table",
+    "kubejs:shapeless": "minecraft:crafting_table",
+    "create:compacting": "create:mechanical_press",
+    "botania:elven_trade": "botania:alfheim_portal",
+    "beachparty:tiki_bar_mixing": "beachparty:tiki_bar",
+    "beachparty:mini_fridge_mixing": "beachparty:mini_fridge",
+    "create_mechanical_extruder:extruding": "create_mechanical_extruder:mechanical_extruder",
+    "meadow:cheese": "meadow:cheese_form",
+    "botania:terra_plate": "botania:terra_plate",
+    "botania:brew": "botania:brewery",
     "minecraft:crafting_shaped": "minecraft:crafting_table",
     "minecraft:crafting_shapeless": "minecraft:crafting_table",
     "minecraft:smelting": "minecraft:furnace",
@@ -415,7 +427,17 @@ def _recipe_inputs(recipe):
     return list(merged.values())
 
 
+# 블록 하나로 말할 수 없는 방식
+RECIPE_METHODS = {
+    "create:item_application": "아이템 적용(재료를 손에 들고 블록에 우클릭)",
+    "create:sequenced_assembly": "Create 순서 조립(기계 손·압착기 등을 차례로 거침)",
+    "create:compacting": "압착기+대야(압축)",
+}
+
+
 def _station(rtype):
+    if rtype in RECIPE_METHODS:
+        return RECIPE_METHODS[rtype]
     block = RECIPE_STATIONS.get(rtype, rtype)
     return display_name(block) if block in names() else rtype
 
@@ -425,20 +447,388 @@ RECIPE_DUMP_VERSION = 2
 
 
 
-def sell_prices():
-    """배송 상자 판매가(config.PRICES_FILE, kubejs/askhowto_prices.js가 서버 시작 때 씀): 아이템 ID -> 카드 한 줄.
-    '<ID>/<변종>' 키(슬라임 플로트·나비 변종)는 뺀다. 파일이 없으면 빈 dict."""
-    if not config.PRICES_FILE.exists():
-        return {}
-    raw = _load_json(config.PRICES_FILE.read_text(encoding="utf-8")) or {}
-    raw.pop("_askhowto", None)
-    out = {}
-    for item_id, trade in raw.items():
-        if "/" in item_id or not isinstance(trade, dict) or not trade.get("value"):
+_startup = None
+
+
+def startup_dump():
+    """KubeJS startup_scripts를 서버 밖에서 Rhino(서버 mods의 KubeJS용 Rhino)로 실행해 뽑은 전역 표:
+    {"machines": [장인 설비 정의와 레시피], "trades": {아이템 ID: {value, multiplier}}}.
+    서버를 재시작하지 않아도 스크립트가 바뀌면 바로 반영된다. 11/07 확인: 판매가 1,997개가 서버 덤프와 모두 같았다.
+    실행이 안 되면(JDK 없음 등) 지난번 결과(data/startup_dump.json), 그것도 없으면 None."""
+    global _startup
+    if _startup is not None:
+        return _startup or None
+    tool = config.ROOT / "tools_offline"
+    classes = config.ROOT / "runs" / "offline"
+    mods, libs = config.SERVER_DIR / "mods", config.SERVER_DIR / "libraries"
+    jars = sorted(mods.glob("rhino-forge-*.jar"))[:1] + sorted(libs.rglob("gson-*.jar"))[:1] + sorted(libs.rglob("commons-lang3-*.jar"))[:1]
+    try:
+        cp = ":".join(map(str, jars + [classes]))
+        if not (classes / "DumpStartup.class").exists() or (tool / "DumpStartup.java").stat().st_mtime > (classes / "DumpStartup.class").stat().st_mtime:
+            classes.mkdir(parents=True, exist_ok=True)
+            subprocess.run([str(config.JDK_BIN / "javac"), "-cp", cp, "-d", str(classes), str(tool / "DumpStartup.java")],
+                           check=True, capture_output=True, timeout=300)
+        run = subprocess.run([str(config.JDK_BIN / "java"), "-cp", cp, "DumpStartup",
+                              str(config.SERVER_DIR / "kubejs" / "startup_scripts"), str(tool / "prelude.js"), str(tool / "dump.js")],
+                             check=True, capture_output=True, timeout=300, text=True)
+        data = json.loads(run.stdout)
+        config.STARTUP_DUMP_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except (OSError, subprocess.SubprocessError, ValueError) as err:
+        print(f"startup_scripts 실행 실패, 지난 결과를 쓴다: {err}")
+        data = _load_json(config.STARTUP_DUMP_FILE.read_text(encoding="utf-8")) if config.STARTUP_DUMP_FILE.exists() else None
+    _startup = data or {}
+    return data
+
+
+def _stack(text):
+    """'2x society:ocean_stone' -> ('society:ocean_stone', 2)"""
+    m = re.match(r"\s*(\d+)x\s+(.+)", str(text))
+    return (m.group(2).strip(), int(m.group(1))) if m else (str(text).strip(), 1)
+
+
+def machine_recipes():
+    """장인 설비 레시피 -> [(만들어지는 아이템 ID, 재료 ID, 줄, 설비 ID)]. 예:
+    ('society:oak_resin', 'minecraft:oak_log', '수액 채취기에서: 참나무 원목에 붙이면 약 5일마다 → 참나무 수지 1개', 'society:tapper').
+    재료가 태그('#minecraft:wool')면 재료 ID 자리에 태그를 둔다."""
+    dump = startup_dump() or {}
+    out = []
+    for machine in dump.get("machines", []):
+        recipes = machine.get("recipes")
+        if not isinstance(recipes, dict):
             continue
-        # 품질 배수: globalShippingBinHandlers.js calculateQualityValue (별 1·2·3개 = 1.25·1.5·2배)
-        out[item_id] = (f"배송 상자에 넣어 팔면 코인 {int(trade['value']):,} "
-                        f"(품질 별 1·2·3개면 1.25·1.5·2배, 스킬 판매 배수는 따로)")
+        station = display_name(machine["id"])
+        need = int(machine.get("maxInput") or 1)
+        for source, recipe in recipes.items():
+            if not isinstance(recipe, dict) or not recipe.get("output"):
+                continue
+            days = recipe.get("time") or machine.get("stageCount")
+            src_name = _tag_name(source[1:]) if source.startswith("#") else display_name(source)
+            outs = [_stack(o) for o in recipe["output"]]
+            made = ", ".join(f"{display_name(i)} {n}개" for i, n in outs)
+            when = f"약 {days:g}일" if isinstance(days, (int, float)) and days else ""
+            if machine["id"] == "society:tapper":
+                line = f"{station}에서: {src_name}에 붙이면 {when}마다 → {made}"
+            else:
+                line = f"{station}에서: {src_name}" + (f" {need}개" if need > 1 else "") + f" → {made}" + (f" ({when})" if when else "")
+            for item, _ in outs:
+                out.append((item, source, line, machine["id"]))
+    return out
+
+
+_item_tags = None
+
+
+def item_tags():
+    """아이템 태그 -> 멤버 아이템 ID 집합 (모드 jar와 바닐라 데이터, 태그 안의 태그도 풀어서)."""
+    global _item_tags
+    if _item_tags is not None:
+        return _item_tags
+    pattern = re.compile(r"data/([^/]+)/tags/items?/(.+)\.json$")
+    raw = {}
+    for _, entry, data in _jar_files(re.compile(r"data/[^/]+/tags/items?/.+\.json$")):
+        m = pattern.match(entry)
+        d = _load_json(data) or {}
+        values = [v if isinstance(v, str) else (v or {}).get("id") for v in d.get("values", [])]
+        key = f"{m.group(1)}:{m.group(2)}"
+        raw[key] = set(values) if d.get("replace") else raw.get(key, set()) | set(values)
+
+    def members(tag, seen=()):
+        out = set()
+        for v in raw.get(tag, ()):
+            if v and v.startswith("#"):
+                if v[1:] not in seen:
+                    out |= members(v[1:], seen + (tag,))
+            elif v:
+                out.add(v)
+        return out
+    _item_tags = {tag: members(tag) for tag in raw}
+    return _item_tags
+
+
+CATEGORY_MIN, CATEGORY_MAX = 3, 80
+
+
+def categories():
+    """묶음 이름(한 낱말) -> 멤버 아이템 ID들. 태그의 한국어 이름(lang의 tag.item.*)이 그 낱말이거나 그 낱말로 끝나는 태그를 모은다.
+    '갑옷' <- '장식 가능한 갑옷'(minecraft:trimmable_armor). '갑옷 업그레이드 어떻게 해?'가 실제 아이템(철 흉갑 등)에 닿게 한다(11/07)."""
+    ko, _ = langs()
+    tags = item_tags()
+    out = {}
+    for key, label in ko.items():
+        if not key.startswith("tag.item.") or not isinstance(label, str):
+            continue
+        rest = key[len("tag.item."):]
+        ns, _, path = rest.partition(".")
+        members = tags.get(f"{ns}:{path.replace('.', '/')}", set())
+        word = label.strip().split()[-1] if label.strip() else ""
+        if re.fullmatch(r"[가-힣]{1,6}", word) and CATEGORY_MIN <= len(members) <= CATEGORY_MAX:
+            out.setdefault(word, set()).update(members)
+    return {w: ids for w, ids in out.items() if len(ids) <= CATEGORY_MAX}
+
+
+def _data_files(pattern):
+    """데이터팩 파일 (리소스 경로 -> JSON). 모드 jar·바닐라 위에 kubejs/data가 같은 경로를 덮어쓴다(팩이 끈 것 반영)."""
+    out = {}
+    regex = re.compile(pattern)
+    for _, entry, data in _jar_files(regex):
+        out[entry] = _load_json(data)
+    base = config.SERVER_DIR / "kubejs"
+    for path in (base / "data").rglob("*.json"):
+        entry = str(path.relative_to(base))
+        if regex.match(entry):
+            out[entry] = _load_json(path.read_text(encoding="utf-8", errors="replace"))
+    return {k: v for k, v in out.items() if isinstance(v, dict)}
+
+
+def _res(entry):
+    """'data/minecraft/worldgen/placed_feature/ore_gold.json' -> 'minecraft:ore_gold'"""
+    m = re.match(r"data/([^/]+)/worldgen/[^/]+/(.+)\.json$", entry)
+    return f"{m.group(1)}:{m.group(2)}" if m else entry
+
+
+BIOME_SET_KO = {"#minecraft:is_overworld": "지상(오버월드)", "#society:mining_biomes": "지상과 해골 광산",
+                "#society:is_skull_cavern": "해골 광산", "#minecraft:is_nether": "네더",
+                "#society:spawns_magma_geodes": "네더와 해골 광산의 사막·흑암 동굴", "#forge:is_overworld": "지상(오버월드)"}
+
+
+# 차원별 (바닥, 천장) — 'above_bottom'/'below_top' 높이를 실제 Y로 바꾸는 데 쓴다(네더는 논리 높이 128)
+DIM_BOUNDS = {"지상": (-64, 320), "네더": (0, 128)}
+
+
+def _y(anchor, dim="지상"):
+    bottom, top = DIM_BOUNDS.get(dim, DIM_BOUNDS["지상"])
+    if not isinstance(anchor, dict):
+        return None
+    if "absolute" in anchor:
+        return int(anchor["absolute"])
+    if "above_bottom" in anchor:
+        return bottom + int(anchor["above_bottom"])
+    if "below_top" in anchor:
+        return top - int(anchor["below_top"])
+    return None
+
+
+def _biome_label(dim, biomes):
+    """생물군계가 많으면 차원 이름, 몇 개뿐이면 그 생물군계 이름들('악지')."""
+    if len(biomes) >= 10:
+        return dim
+    ko, en = langs()
+    names = [ko.get(f"biome.{b.replace(':', '.')}") or en.get(f"biome.{b.replace(':', '.')}") or b.split(":")[-1] for b in sorted(biomes)]
+    return f"{dim}의 " + "·".join(dict.fromkeys(names)) + " 생물군계"
+
+
+def ore_generation():
+    """광석 블록 ID -> ['Y -64~32, 가장 많은 높이 Y -16, 한 덩어리 최대 9개, 청크당 4번, 지상(오버월드)' …].
+    바닐라는 생물군계 정의에 든 광석, 모드는 생물군계 수정(forge:add_features)으로 더한 광석. 팩이 끈 것(forge:false)은 뺀다.
+    ('금좌표', 11/08 — 직접 쓴 바닐라 문서 말고는 광석 높이 자료가 없었다)"""
+    placed = {_res(k): v for k, v in _data_files(r"data/[^/]+/worldgen/placed_feature/.+\.json$").items()}
+    configured = {_res(k): v for k, v in _data_files(r"data/[^/]+/worldgen/configured_feature/.+\.json$").items()}
+    where, dims = {}, {}  # placed feature -> 어디에서(글), 차원
+    by_biome = {}
+    for k, biome in _data_files(r"data/[^/]+/worldgen/biome/.+\.json$").items():
+        dim = "네더" if any(w in k for w in ("nether", "crimson", "warped", "basalt", "soul_sand")) else "지상"
+        for step in biome.get("features") or []:
+            for f in step if isinstance(step, list) else []:
+                if isinstance(f, str):
+                    by_biome.setdefault(f, {}).setdefault(dim, set()).add(_res(k).replace("worldgen/biome/", ""))
+    for f, per_dim in by_biome.items():
+        for dim, biomes in per_dim.items():
+            where.setdefault(f, set()).add(_biome_label(dim, biomes))
+            dims[f] = dim
+    for k, mod in _data_files(r"data/[^/]+/forge/biome_modifier/.+\.json$").items():
+        if mod.get("type") != "forge:add_features" or any(c.get("type") == "forge:false" for c in mod.get("forge:conditions", []) if isinstance(c, dict)):
+            continue
+        biomes = mod.get("biomes")
+        label = BIOME_SET_KO.get(biomes, biomes) if isinstance(biomes, str) else "여러 생물군계"
+        for f in [mod.get("features")] if isinstance(mod.get("features"), str) else (mod.get("features") or []):
+            if isinstance(f, str):
+                where.setdefault(f, set()).add(label)
+    out = {}
+    for pid, feature in placed.items():
+        if pid not in where:
+            continue
+        conf = configured.get(feature.get("feature")) if isinstance(feature.get("feature"), str) else None
+        if not conf or conf.get("type") not in ("minecraft:ore", "minecraft:scattered_ore"):
+            continue
+        cfg = conf.get("config") or {}
+        blocks = [(t.get("state") or {}).get("Name") for t in cfg.get("targets") or [] if isinstance(t, dict)]
+        count, low, high, peak = None, None, None, None
+        for step in feature.get("placement") or []:
+            if step.get("type") == "minecraft:count" and isinstance(step.get("count"), int):
+                count = step["count"]
+            if step.get("type") == "minecraft:rarity_filter":
+                count = f"1/{step.get('chance')}"
+            if step.get("type") == "minecraft:height_range":
+                h = step.get("height") or {}
+                dim = dims.get(pid, "네더" if "네더" in " ".join(where[pid]) else "지상")
+                low, high = _y(h.get("min_inclusive"), dim), _y(h.get("max_inclusive"), dim)
+                if h.get("type") == "minecraft:trapezoid" and low is not None and high is not None:
+                    peak = (low + high) // 2
+                # 바닥보다 아래까지 잡은 범위(다이아몬드 -144)는 실제로는 바닥에서 시작한다
+                bottom, top = DIM_BOUNDS[dim]
+                low, high = (max(low, bottom) if low is not None else None), (min(high, top) if high is not None else None)
+                peak = max(peak, bottom) if peak is not None else None
+        if low is None:
+            continue
+        line = f"Y {low}~{high}" + (f", 가장 많은 높이 Y {peak}" if peak is not None else ", 이 범위에 고르게")
+        line += f", 한 덩어리 최대 {cfg.get('size')}개" if cfg.get("size") else ""
+        line += f", 청크당 {count}번" if count is not None else ""
+        line += f" ({', '.join(sorted(where[pid]))})"
+        for b in dict.fromkeys(b for b in blocks if b):
+            if line not in out.setdefault(b, []):
+                out[b].append(line)
+    # 팩이 생성을 끈 광석(설정을 no_op으로 덮어씀: 고대 잔해 등)
+    originals = {}
+    for _, entry, data in _jar_files(re.compile(r"data/[^/]+/worldgen/configured_feature/.+\.json$")):
+        d = _load_json(data) or {}
+        if d.get("type") in ("minecraft:ore", "minecraft:scattered_ore"):
+            originals.setdefault(_res(entry), [(t.get("state") or {}).get("Name") for t in (d.get("config") or {}).get("targets") or []])
+    for cid, blocks in originals.items():
+        if (configured.get(cid) or {}).get("type") == "minecraft:no_op":
+            for b in blocks:
+                if b and b not in out:
+                    out[b] = ["이 서버에서는 자연 생성되지 않음(팩이 생성을 껐다)"]
+    return out
+
+
+def automation_io():
+    """KubeJS로 만든 블록 중 아이템 입출력 기능(CapabilityBuilder.ITEM의 insertItem/extractItem)을 붙인 것:
+    블록 ID -> '호퍼·파이프로 아이템을 넣을 수 있음, 뺄 수 있음'. ('호퍼로 배송상자에 넣을 수 있어?', 11/07)"""
+    out = {}
+    for path in (config.SERVER_DIR / "kubejs" / "startup_scripts").rglob("*.js"):
+        src = path.read_text(encoding="utf-8", errors="replace")
+        starts = [(m.start(), m.group(1)) for m in re.finditer(r'\.create\(\s*"([a-z0-9_]+:[a-z0-9_/]+)"', src)]
+        for n, (pos, block_id) in enumerate(starts):
+            part = src[pos:starts[n + 1][0] if n + 1 < len(starts) else len(src)]
+            if "CapabilityBuilder.ITEM" not in part:
+                continue
+            can = [w for w, key in (("넣을", ".insertItem("), ("뺄", ".extractItem(")) if key in part]
+            if can:
+                out[block_id] = "호퍼·파이프로 아이템을 " + "·".join(can) + " 수 있음"
+    # 장인 호퍼가 다루는 설비('case "society:fish_smoker"'): 입출력 기능이 없으면 일반 호퍼로는 못 넣는다
+    # ('생선 훈제기에 깔때기로 아이템 들어감?', 11/09).
+    hoppers, served = [], set()
+    for path in (config.SERVER_DIR / "kubejs" / "startup_scripts").rglob("*.js"):
+        src = path.read_text(encoding="utf-8", errors="replace")
+        made = re.findall(r'\.create\(\s*"([a-z0-9_]+:[a-z0-9_]*artisan_hopper)"', src)
+        if made:
+            hoppers += made
+            served |= set(re.findall(r'case\s+"([a-z0-9_]+:[a-z0-9_]+)"', src))
+    hopper_names = "·".join(display_name(h) for h in dict.fromkeys(hoppers))
+    for machine_id in sorted(served):
+        if machine_id not in out and machine_id in names():
+            out[machine_id] = f"일반 호퍼·파이프로는 아이템을 못 넣고 뺄 수도 없음. {hopper_names}(위에 재료 보관함, 아래에 받을 보관함)로 자동화한다"
+    for h in dict.fromkeys(hoppers):
+        out[h] = (out.get(h, "") + " / " if h in out else "") + "자동화하는 설비: " + ", ".join(
+            display_name(m) for m in sorted(served) if m in names())
+    return out
+
+
+def sell_values():
+    """아이템 ID -> 배송 상자 기본 판매가(코인). '<ID>/<변종>' 키는 뺀다."""
+    if config.PRICES_FILE.exists():
+        raw = _load_json(config.PRICES_FILE.read_text(encoding="utf-8")) or {}
+    else:
+        raw = (startup_dump() or {}).get("trades", {})
+    return {i: int(t["value"]) for i, t in raw.items()
+            if "/" not in i and isinstance(t, dict) and t.get("value")}
+
+
+# 판매가 종류(globalRegistry.js getConfiguredValue의 배수 이름) -> 스킬 트리에서 쓰는 말 ('농부 생산품의 가치 +15%')
+SELL_KIND_KO = {"crop": "농부 생산품", "gem": "지질학자 생산품", "wood": "장인 생산품", "meat": "탐험가 생산품"}
+
+
+def sell_kinds():
+    """아이템 ID -> 판매가 종류의 한국어 이름('농부 생산품'). 스킬 보너스가 어느 아이템에 붙는지 잇는다."""
+    if config.PRICES_FILE.exists():
+        raw = _load_json(config.PRICES_FILE.read_text(encoding="utf-8")) or {}
+        kind = lambda t: t.get("kind")
+    else:
+        raw = (startup_dump() or {}).get("trades", {})
+        kind = lambda t: str(t.get("multiplier", "")).split(":")[-1].replace("_sell_multiplier", "")
+    return {i: SELL_KIND_KO[kind(t)] for i, t in raw.items() if isinstance(t, dict) and kind(t) in SELL_KIND_KO}
+
+
+def sell_prices():
+    """배송 상자 판매가: 아이템 ID -> 카드 한 줄. 서버 덤프(config.PRICES_FILE, kubejs/askhowto_prices.js)가 없으면
+    시작 스크립트를 직접 실행한 표(startup_dump)를 쓴다(값은 같다)."""
+    # 품질 배수: globalShippingBinHandlers.js calculateQualityValue (별 1·2·3개 = 1.25·1.5·2배)
+    kinds = sell_kinds()
+    return {item_id: f"배송 상자에 넣어 팔면 코인 {value:,} ("
+                     + (f"{kinds[item_id]}, " if item_id in kinds else "")
+                     + "품질 별 1·2·3개면 1.25·1.5·2배, 스킬 보너스는 따로)"
+            for item_id, value in sell_values().items()}
+
+# 블록을 꽃 옆에 두면 바뀌는 보타니아 레시피: 종류 -> 꽃 블록 (입력·출력이 아이템이 아니라 블록이라 따로 읽는다)
+FLOWER_RECIPES = {"botania:pure_daisy": "botania:pure_daisy", "botania:state_copying_pure_daisy": "botania:pure_daisy",
+                  "botania:orechid": "botania:orechid", "botania:orechid_ignem": "botania:orechid_ignem",
+                  "botania:marimorphosis": "botania:marimorphosis"}
+
+
+def _block_side(value):
+    """{"type": "block", "block": id} / {"type": "tag", "tag": t} / {"name": id} / id -> (이름, ID들)."""
+    if isinstance(value, str):
+        return display_name(value), [value]
+    if isinstance(value, dict):
+        if value.get("tag"):
+            return _tag_name(value["tag"]), []
+        block = value.get("block") or value.get("name") or value.get("id")
+        if isinstance(block, str):
+            return display_name(block), [block]
+        if isinstance(value.get("blocks"), list) and value["blocks"]:
+            return display_name(value["blocks"][0]) + (" 등" if len(value["blocks"]) > 1 else ""), list(value["blocks"])
+    return None, []
+
+
+def _flower_line(recipe, rtype):
+    """정화의 데이지 등: (결과 ID, '정화의 데이지 옆에 돌을 놓으면 바뀜', 종류, 재료들) 또는 None.
+    ('생명의 돌 반 블록은 어케 얻는데' — 생명의 돌의 시작점이 이 레시피인데 자료에 없었다, 11/08)"""
+    src_name, src_ids = _block_side(recipe.get("input"))
+    out_name, out_ids = _block_side(recipe.get("output"))
+    if not src_name or not out_ids:
+        return None
+    flower = display_name(FLOWER_RECIPES[rtype])
+    return out_ids[0], f"{flower}(꽃) 옆에 블록을 놓아 두면 바뀜: {src_name} → {out_name}", rtype, [(src_name, 1, src_ids)]
+
+
+def _recipe_line(recipe):
+    """레시피 JSON -> (결과 ID, '제작대에서: 막대기 2, 실 3', 종류, 재료들) 또는 None."""
+    rtype = recipe.get("type", "")
+    if rtype in FLOWER_RECIPES:
+        return _flower_line(recipe, rtype)
+    # 스크립트가 추가한 레시피는 덤프 시점에 종류가 'unknown'으로 남을 수 있다. 형판+기본+재료 꼴이면 대장장이 작업대다.
+    if rtype in ("", "unknown") and all(k in recipe for k in ("template", "base", "addition")):
+        rtype = "minecraft:smithing_transform"
+    outputs = _stacks(recipe.get("result") or recipe.get("results") or recipe.get("output") or recipe.get("outputs"))
+    inputs = _recipe_inputs(recipe)
+    if not outputs or not inputs:
+        return None
+    item, count = outputs[0]
+    parts = ", ".join(f"{name} {n}" if n > 1 else name for name, n, _ in inputs)
+    return item, f"{_station(rtype)}에서: {parts}" + (f" → {count}개" if count > 1 else ""), rtype, inputs
+
+
+CONDITION_KEYS = ("conditions", "forge:conditions", "fabric:load_conditions", "neoforge:conditions")
+
+
+def removed_recipes():
+    """모드 jar에는 있는데 서버 최종 레시피(덤프)에 없는 것 = 이 팩이 지운 레시피: 결과 ID -> [줄].
+    ('안산암 합금: 제작대에서 안산암, 아연 조각' — 이 서버는 철 코인으로만 만든다, 11/07)
+    다른 모드가 있을 때만 켜지는 조건부 레시피는 원래 안 쓰이는 것일 수 있어 뺀다. 덤프가 없으면 빈 dict."""
+    if not config.RECIPES_FILE.exists():
+        return {}
+    dumped = set((_load_json(config.RECIPES_FILE.read_text(encoding="utf-8")) or {}).keys())
+    pattern = re.compile(r"data/([^/]+)/recipes?/(.+)\.json$")
+    out = {}
+    for _, entry, data in _jar_files(re.compile(r"data/[^/]+/recipes?/.+\.json$")):
+        m = pattern.match(entry)
+        rid = f"{m.group(1)}:{m.group(2)}"
+        recipe = _load_json(data)
+        if rid in dumped or not isinstance(recipe, dict) or any(k in recipe for k in CONDITION_KEYS):
+            continue
+        parsed = _recipe_line(_unwrap(recipe))
+        if parsed and parsed[1] not in out.get(parsed[0], []):
+            out.setdefault(parsed[0], []).append(parsed[1])
     return out
 
 
@@ -453,26 +843,32 @@ def recipes():
     meta = _load_json(raw.pop("_askhowto", "")) or {}
     if meta.get("version", 0) < RECIPE_DUMP_VERSION:
         return None
-    made, uses = {}, {}
+    made, uses, line_inputs = {}, {}, {}
     for rid, text in raw.items():
-        recipe = _unwrap(_load_json(text) if isinstance(text, str) else text)
-        rtype = recipe.get("type", "")
-        # 스크립트가 추가한 레시피는 덤프 시점에 종류가 'unknown'으로 남을 수 있다. 형판+기본+재료 꼴이면 대장장이 작업대다.
-        if rtype in ("", "unknown") and all(k in recipe for k in ("template", "base", "addition")):
-            rtype = "minecraft:smithing_transform"
-        outputs = _stacks(recipe.get("result") or recipe.get("results") or recipe.get("output") or recipe.get("outputs"))
-        inputs = _recipe_inputs(recipe)
-        if not outputs or not inputs:
+        parsed = _recipe_line(_unwrap(_load_json(text) if isinstance(text, str) else text))
+        if not parsed:
             continue
-        item, count = outputs[0]
-        parts = ", ".join(f"{name} {n}" if n > 1 else name for name, n, _ in inputs)
-        line = f"{_station(rtype)}에서: {parts}" + (f" → {count}개" if count > 1 else "")
+        item, line, rtype, inputs = parsed
         made.setdefault(item, []).append((RECIPE_ORDER.index(rtype) if rtype in RECIPE_ORDER else 99, line))
+        line_inputs[(item, line)] = {i for _, _, ids in inputs for i in ids[:1]}
         if rtype not in NOISY_USE_TYPES:
             for _, _, ids in inputs:
                 for i in ids:
                     if i != item:
                         uses.setdefault(i, []).append(item)
+    # 장인 설비 레시피(KubeJS 전역 표라 레시피 덤프에 없다, 11/07 수액 채취기)
+    for item, source, line, _ in machine_recipes():
+        made.setdefault(item, []).append((len(RECIPE_ORDER), line))
+        if not source.startswith("#") and source != item:
+            # 설비 쓰임새는 앞에 둔다(원목처럼 재료로 수백 곳에 쓰이면 뒤에 붙인 것은 카드에서 잘린다).
+            uses.setdefault(source, []).insert(0, item)
+    # 서로를 재료로만 바꾸는 레시피(생명의 돌 ↔ 생명의 돌 반 블록, 블록 ↔ 주괴)는 얻는 방법이 아니다. 표시해서 다른 방법을 찾게 한다.
+    for (item, line), srcs in list(line_inputs.items()):
+        if len(srcs) == 1:
+            other = next(iter(srcs))
+            back = [l for l in made.get(other, []) if line_inputs.get((other, l[1])) == {item}]
+            if back and len(back) == len(made.get(other, [])):
+                made[item] = [(o, l + " (서로 바꾸는 것일 뿐, 처음 얻는 방법은 아님)" if l == line else l) for o, l in made[item]]
     out = {}
     for item, lines in made.items():
         out[item] = {"make": list(dict.fromkeys(l for _, l in sorted(lines))), "uses": []}
