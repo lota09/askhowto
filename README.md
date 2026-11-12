@@ -41,17 +41,17 @@
 |---|---|---|---|---|
 | `nim` | NVIDIA NIM `z-ai/glm-5.3-flash` | 12,000자, 검색 20개, 점수 컷 0.2 | 2번, 90초 | 무료, 한도 비공개. 추론을 끌 수 없어 분류도 `low` |
 | `gemini` | Google AI Studio `gemini-3.1-flash-lite` | 12,000자, 검색 20개, 점수 컷 0.2 | 2번, 60초 | 무료 등급(입력이 구글 학습에 쓰임). 분당 한도·혼잡(503)이 잦다 |
-| `local` | 로컬 `gemma-4-e4b` (llama.cpp) | 3,000자, 검색 10개, 점수 컷 0.4 | 1번, 150초 | 아래 실측 |
+| `local` | 이 기기 llama.cpp `local`(Qwen3.8-Flash-Next IQ3_M, CUDA) | 12,000자, 검색 20개, 점수 컷 0.2, 도구 사용 | 1번, 90초 | 11/13부터 1순위 |
 
 - API 키는 `llm.env`(권한 600, run.sh가 사이드카를 띄울 때마다 읽음)에만 있다. 키를 지우면 그 서비스는 "키 없음"으로 건너뛴다.
 - 순서는 `ASKHOWTO_CHAIN=gemini,local`처럼, 서비스별 값은 `ASKHOWTO_NIM_MODEL`, `ASKHOWTO_GEMINI_CONTEXT_CHARS` 같은 환경변수로 바꾼다.
 - 후보 비교(BAZE·Gemini·NIM 11개 모델, 89문항): `runs/model-compare/REPORT.md`.
 
-### 로컬 LLM (`gemma-4-e4b`, http://192.168.50.135:8080/v1, 11/13부터)
-- llama.cpp 서버, `gemma-4-E4B_q4_0-it.gguf`. 문맥 65,536토큰을 슬롯 4개가 나눠 요청당 약 16K토큰.
-- 느리다: 11/13 실측 입력 18 tok/s, 출력 5.5 tok/s(3,400토큰 프롬프트에 190초). 그래서 자료 3,000자·프롬프트 6,000자만 넣고 재시도하지 않는다
-  (플레이어 대기 한도 3분). 도구 호출은 쓰지 않는다(분류 + 답 2번).
-- 11/13 이전에는 `Gemma-4-E2B-it`(192.168.50.153:8000, 문맥 3.2K토큰, 자료 4,000자)였다.
+### 로컬 LLM (이 기기 http://localhost:8080/v1, 11/13부터 1순위)
+- 9700K 데스크톱의 llama.cpp 서버(CUDA), 별칭 `local`, 모델 Qwen3.8-Flash-Next IQ3_M. 슬롯 4개, 슬롯당 문맥 약 58K토큰.
+- 11/13 실측 입력 830 tok/s, 출력 48 tok/s. 도구 호출이 되므로 NIM·Gemini와 같은 방식(도구 사용, 자료 12,000자)으로 쓴다.
+- 기본 순서는 `local,nim,gemini`. 로컬이 실패하면 NIM, Gemini 순으로 넘어간다.
+- 예전: 폰의 `Gemma-4-E2B-it`(문맥 3.2K), 11/13 잠시 192.168.50.135의 `gemma-4-e4b`(입력 18 tok/s라 마지막 수단).
 
 ## 문서 (RAG 자료)
 

@@ -28,7 +28,9 @@ STARTUP_DUMP_FILE = DATA_DIR / "startup_dump.json"
 # 묶음 이름(태그의 한국어 이름) -> 아이템 ID들 ('갑옷' -> 철 흉갑 …)
 CATEGORIES_FILE = DATA_DIR / "categories.json"
 _HOME_JDK = Path.home() / ".local/jdk/jdk-17.0.21+9/bin"
-_SYS_JDK = Path("/usr/lib/jvm/java-17-openjdk-arm64/bin")  # apt openjdk-17-jdk-headless
+# apt openjdk-17-jdk-headless (폰 arm64, 데스크톱 amd64)
+_SYS_JDK = next((p for p in sorted(Path("/usr/lib/jvm").glob("java-17-openjdk-*/bin")) if (p / "javac").exists()),
+                Path("/usr/lib/jvm/java-17-openjdk-arm64/bin"))
 JDK_BIN = Path(os.environ.get("ASKHOWTO_JDK_BIN", str(_HOME_JDK if (_HOME_JDK / "javac").exists() else _SYS_JDK)))
 NAMES_FILE = DATA_DIR / "names.jsonl"
 # 아이템별 제작법·쓰임새 (검색 색인에는 넣지 않고, 질문에 이름이 나왔을 때만 붙인다)
@@ -82,15 +84,14 @@ PROVIDERS = {
                         "gemini-3.1-flash-lite", reasoning="low", classify_reasoning="none", context_chars=12000,
                         top_k=20, max_tokens=3000, timeout=15, retries=1, tools=True,
                         backup_models=("gemini-3.5-flash-lite",)),
-    # 같은 네트워크의 로컬 Gemma (11/13 192.168.50.135:8080 llama.cpp, gemma-4-E4B q4_0으로 바뀜).
-    # 문맥은 요청당 약 16K토큰이지만 느리다: 11/13 실측 입력 18 tok/s, 출력 5.5 tok/s(예전 E2B는 입력 약 120 tok/s).
-    # 자료 1만 자를 넣으면 2~3분이 걸려 플레이어 대기 한도(3분)를 넘으므로 예전처럼 작게 넣고, 실패하면 다시 하지 않는다.
-    "local": _provider("local", "로컬 Gemma", "http://192.168.50.135:8080/v1", "gemma-4-e4b",
-                       context_chars=3000, top_k=10, max_tokens=500, max_prompt_chars=6000, answer_chars=450,
-                       timeout=150, retries=1),
+    # 이 기기(9700K 데스크톱)의 llama.cpp: 별칭 'local'(Qwen3.8-Flash-Next IQ3_M, CUDA). 11/13 실측 입력 830 tok/s,
+    # 출력 48 tok/s, 문맥 슬롯당 약 58K토큰, 도구 호출 됨 -> 클라우드와 같은 방식(도구 사용, 자료 12,000자)으로 1순위.
+    # 처음 한 번은 불러오느라 1분쯤 걸릴 수 있다.
+    "local": _provider("local", "로컬 Qwen", "http://localhost:8080/v1", "local",
+                       context_chars=12000, top_k=20, max_tokens=2000, timeout=90, retries=1, tools=True),
 }
 # /askmodel default 일 때 이 순서로 시도한다. 직접 고른 서비스는 실패해도 넘어가지 않는다.
-DEFAULT_CHAIN = os.environ.get("ASKHOWTO_CHAIN", "nim,gemini,local").split(",")
+DEFAULT_CHAIN = os.environ.get("ASKHOWTO_CHAIN", "local,nim,gemini").split(",")
 MODEL_CHOICES = ["default"] + list(PROVIDERS)
 SEARCH_K = max(p["top_k"] for p in PROVIDERS.values())
 
