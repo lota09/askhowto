@@ -691,6 +691,88 @@ def ore_generation():
     return out
 
 
+def tree_biomes():
+    """원목 블록 ID -> 그 나무가 자연히 자라는 생물군계 이름들. 생물군계의 지형 기능을 따라가(무작위 선택 → 배치 → 나무)
+    나무 줄기 블록을 찾는다. 모드가 생물군계 수정으로 더한 나무도 포함. ('가문비나무 어느 생물군계에서 구해?', 11/11)"""
+    placed = {_res(k): v for k, v in _data_files(r"data/[^/]+/worldgen/placed_feature/.+\.json$").items()}
+    configured = {_res(k): v for k, v in _data_files(r"data/[^/]+/worldgen/configured_feature/.+\.json$").items()}
+    ko, en = langs()
+
+    def from_placed(ref, depth=0):
+        """배치 기능(ID 또는 객체) -> 나무 줄기 블록들. 배치의 'feature'는 설정 기능을 가리킨다(ID가 같아도 다른 것)."""
+        if depth > 8 or ref is None:
+            return set()
+        if isinstance(ref, str):
+            ref = placed.get(ref)
+        return from_configured(ref.get("feature"), depth + 1) if isinstance(ref, dict) else set()
+
+    def from_configured(ref, depth=0):
+        if depth > 8 or ref is None:
+            return set()
+        if isinstance(ref, str):
+            ref = configured.get(ref)
+        if not isinstance(ref, dict):
+            return set()
+        cfg = ref.get("config") or {}
+        if ref.get("type") == "minecraft:tree":
+            state = ((cfg.get("trunk_provider") or {}).get("state") or {}).get("Name")
+            return {state} if state else set()
+        out = set()
+        for item in cfg.get("features") or []:  # random_selector: {chance, feature(배치)} / simple_random_selector: 배치들
+            out |= from_placed(item.get("feature") if isinstance(item, dict) and "chance" in item else item, depth + 1)
+        for key in ("default", "feature_true", "feature_false"):
+            if key in cfg:
+                out |= from_placed(cfg[key], depth + 1)
+        if isinstance(cfg.get("feature"), (str, dict)):  # random_patch 등
+            out |= from_placed(cfg["feature"], depth + 1)
+        return out
+
+    trunks = from_placed
+
+    def biome_name(bid):
+        key = f"biome.{bid.replace(':', '.')}"
+        return ko.get(key) or en.get(key) or bid.split(":")[-1].replace("_", " ")
+
+    tag_raw = {}
+    for k, d in _data_files(r"data/[^/]+/tags/worldgen/biome/.+\.json$").items():
+        m = re.match(r"data/([^/]+)/tags/worldgen/biome/(.+)\.json$", k)
+        tag_raw[f"{m.group(1)}:{m.group(2)}"] = [v if isinstance(v, str) else (v or {}).get("id") for v in d.get("values", [])]
+
+    def tag_biomes(tag, seen=()):
+        out = []
+        for v in tag_raw.get(tag, []):
+            if v and v.startswith("#"):
+                out += tag_biomes(v[1:], seen + (tag,)) if v[1:] not in seen else []
+            elif v:
+                out.append(v)
+        return out
+
+    def label_of(biomes):
+        """생물군계 수정의 'biomes'(태그나 목록) -> 생물군계 이름들."""
+        if isinstance(biomes, str) and biomes in BIOME_SET_KO:
+            return [BIOME_SET_KO[biomes]]
+        ids = tag_biomes(biomes[1:]) if isinstance(biomes, str) and biomes.startswith("#") else (
+            [biomes] if isinstance(biomes, str) else [b for b in biomes or [] if isinstance(b, str)])
+        return [biome_name(b) for b in ids if not b.startswith("#")] or ["여러 생물군계"]
+
+    out = {}
+    for k, biome in _data_files(r"data/[^/]+/worldgen/biome/.+\.json$").items():
+        bid = _res(k).replace("worldgen/biome/", "")
+        for step in biome.get("features") or []:
+            for f in step if isinstance(step, list) else []:
+                for log in trunks(f):
+                    out.setdefault(log, set()).add(biome_name(bid))
+    for k, mod in _data_files(r"data/[^/]+/forge/biome_modifier/.+\.json$").items():
+        if mod.get("type") != "forge:add_features" or any(
+                c.get("type") == "forge:false" for c in mod.get("forge:conditions", []) if isinstance(c, dict)):
+            continue
+        labels = label_of(mod.get("biomes"))
+        for f in [mod.get("features")] if isinstance(mod.get("features"), str) else (mod.get("features") or []):
+            for log in trunks(f):
+                out.setdefault(log, set()).update(labels)
+    return {log: sorted(b) for log, b in out.items()}
+
+
 def automation_io():
     """KubeJS로 만든 블록 중 아이템 입출력 기능(CapabilityBuilder.ITEM의 insertItem/extractItem)을 붙인 것:
     블록 ID -> '호퍼·파이프로 아이템을 넣을 수 있음, 뺄 수 있음'. ('호퍼로 배송상자에 넣을 수 있어?', 11/07)"""

@@ -82,10 +82,12 @@ PROVIDERS = {
                         "gemini-3.1-flash-lite", reasoning="low", classify_reasoning="none", context_chars=12000,
                         top_k=20, max_tokens=3000, timeout=15, retries=1, tools=True,
                         backup_models=("gemini-3.5-flash-lite",)),
-    # 같은 네트워크의 로컬 Gemma. 컨텍스트 약 3.2K 토큰(실측)이라 자료는 4,000자까지만. 바쁘면 연결을 끊어서 여러 번 재시도한다.
-    # 프롬프트 6,600자: 11/03 실측으로 약 6,900자(1,730토큰)를 넘으면 연결이 끊긴다.
-    "local": _provider("local", "로컬 Gemma", "http://192.168.50.153:8000/v1", "Gemma-4-E2B-it",
-                       max_prompt_chars=6600, answer_chars=450, retries=6, retry_wait=2),
+    # 같은 네트워크의 로컬 Gemma (11/13 192.168.50.135:8080 llama.cpp, gemma-4-E4B q4_0으로 바뀜).
+    # 문맥은 요청당 약 16K토큰이지만 느리다: 11/13 실측 입력 18 tok/s, 출력 5.5 tok/s(예전 E2B는 입력 약 120 tok/s).
+    # 자료 1만 자를 넣으면 2~3분이 걸려 플레이어 대기 한도(3분)를 넘으므로 예전처럼 작게 넣고, 실패하면 다시 하지 않는다.
+    "local": _provider("local", "로컬 Gemma", "http://192.168.50.135:8080/v1", "gemma-4-e4b",
+                       context_chars=3000, top_k=10, max_tokens=500, max_prompt_chars=6000, answer_chars=450,
+                       timeout=150, retries=1),
 }
 # /askmodel default 일 때 이 순서로 시도한다. 직접 고른 서비스는 실패해도 넘어가지 않는다.
 DEFAULT_CHAIN = os.environ.get("ASKHOWTO_CHAIN", "nim,gemini,local").split(",")

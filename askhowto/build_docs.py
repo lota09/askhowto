@@ -347,6 +347,104 @@ def society():
     return out
 
 
+PONDER_RE = re.compile(r"^([a-z0-9_]+)\.ponder\.([a-z0-9_]+)\.(header|text_(\d+))$")
+
+
+def tree_places(biomes):
+    """생물군계 이름들 -> 한 줄. 너무 많으면(참나무는 바다 생물군계까지 수십 곳) 줄인다."""
+    if len(biomes) > 20:
+        return f"지상 여러 곳(생물군계 {len(biomes)}곳, 예: {', '.join(biomes[:6])})"
+    return ", ".join(biomes) + " 생물군계"
+
+
+def trees():
+    """'나무(원목)별 자라는 생물군계' 요약 카드 (worldgen). '소나무 어느 생물군계에서 구해?'(11/11)"""
+    rows = [(clean(gamedata.display_name(log)), tree_places(b)) for log, b in gamedata.tree_biomes().items()]
+    if not rows:
+        return []
+    lines = ["나무(원목)가 자연히 자라는 생물군계(바이옴). 이 서버의 worldgen 자료에서 뽑았다. 묘목을 사서 심어도 된다.",
+             "생물군계 위치는 자연의 나침반(생물군계를 골라 찾는 나침반)으로 찾을 수 있다."]
+    lines += [f"- {name}: {where}" for name, where in sorted(rows)]
+    return chunk("tip", "trees", "나무별 자라는 생물군계 (어디서 찾나, 바이옴 위치)", lines)
+
+
+def ponders():
+    """Create 계열 모드의 ponder(게임 안에서 W키로 보는 사용 설명) 한국어 문장 -> 장면마다 카드 '사용법: 기계 팔'.
+    ('기계팔이 작동을 안하는 이유', 11/10 — 설명 841개가 lang에 있는데 자료에 없었다)"""
+    ko, en = gamedata.langs()
+    names = gamedata.names()
+    scenes = {}
+    for key in set(ko) | set(en):
+        m = PONDER_RE.match(key)
+        if m:
+            text = clean(ko.get(key) or en.get(key) or "")
+            if text:
+                scene = scenes.setdefault((m.group(1), m.group(2)), {"header": "", "lines": []})
+                if m.group(3) == "header":
+                    scene["header"] = text
+                else:
+                    scene["lines"].append((int(m.group(4)), text))
+    out = []
+    for (ns, sid), scene in sorted(scenes.items()):
+        if not scene["lines"]:
+            continue
+        # 장면 이름이 블록 ID와 같으면('mechanical_arm') 그 블록 이름으로 찾게 한다
+        item = next((i for i in (f"{ns}:{sid}", f"create:{sid}") if i in names), None)
+        item_name = clean(gamedata.display_name(item)) if item else ""
+        title = item_name or scene["header"] or sid.replace("_", " ")
+        lines = [f"사용법({scene['header'] or title})"] + [t for _, t in sorted(scene["lines"])]
+        out += chunk("ponder", f"{ns}.{sid}", f"사용법: {title}", lines,
+                     names=aliases(item_name, item) if item_name else None)
+    return out
+
+
+def item_hints():
+    """lang의 아이템 설명 중 카드에 없던 것: Relics 능력 설명, JEI 안내(Quark 등) -> {아이템 ID: [줄]}.
+    아이템으로 이을 수 없는 JEI 안내는 따로 카드로 만든다(이름 없음)."""
+    ko, en = gamedata.langs()
+    names = gamedata.names()
+    text = lambda k: clean(ko.get(k) or en.get(k) or "")
+    by_item, loose = {}, []
+    for key in sorted(set(ko) | set(en)):
+        m = re.match(r"^tooltip\.relics\.([a-z0-9_]+)\.ability\.([a-z0-9_]+)\.description$", key)
+        if m and f"relics:{m.group(1)}" in names and text(key):
+            ability = text(f"tooltip.relics.{m.group(1)}.ability.{m.group(2)}") or m.group(2)
+            by_item.setdefault(f"relics:{m.group(1)}", []).append(f"능력 '{ability}': {text(key)}")
+            continue
+        m = re.match(r"^([a-z0-9_]+)\.jei\.(?:hint|info|description)\.(.+)$", key)
+        if m and text(key):
+            parts = m.group(2).split(".")
+            item = next((i for i in ([f"{parts[0]}:{parts[1]}"] if len(parts) == 2 else []) + [f"{m.group(1)}:{parts[-1]}"]
+                         if i in names), None)
+            if item:
+                by_item.setdefault(item, []).append(f"설명: {text(key)}")
+            elif parts[-1] != "preamble":
+                loose.append((m.group(1), parts[-1], text(key)))
+    # 아이템이 한두 개뿐인 모드는 그 모드의 화면 문구(string.<모드>.*, gui.<모드>.*)를 붙인다. 설명 문장이 없는 도구 모드
+    # (자연의 나침반: '생물군계 선택', '검색 시작', '거리', '순간이동')도 무엇을 하는지 짐작할 근거가 된다(11/10 '바이옴 찾는 법').
+    per_ns = {}
+    for item_id, entry in names.items():
+        if entry.get("kind") in ("item", "block"):
+            per_ns.setdefault(item_id.split(":")[0], []).append(item_id)
+    for ns, items in per_ns.items():
+        if len(items) > 2:
+            continue
+        ui = [text(k) for k in sorted(set(ko) | set(en)) if re.match(rf"^(string|gui|screen)\.{re.escape(ns)}\.", k) and text(k)]
+        ui = list(dict.fromkeys(t for t in ui if len(t) <= 20))
+        if len(ui) >= 5:
+            for item in items:
+                by_item.setdefault(item, []).append("사용 화면에 나오는 말: " + ", ".join(ui[:40]))
+    return by_item, loose
+
+
+def hint_cards():
+    _, loose = item_hints()
+    out = []
+    for ns, hid, body in loose:
+        out += chunk("tip", f"jei.{ns}.{hid}", f"도움말({ns}): {hid.replace('_', ' ')}", [body])
+    return out
+
+
 def enchantments():
     """마법 부여마다 카드: 이름(한국어·영어), 설명, 어느 모드 것인지. lang의 enchantment.<모드>.<이름>(.desc).
     ('무적 프레임이랑 빠른 크랭크 설명해줘', 11/08 — 이름·설명이 lang에 있는데 자료에 없었다)"""
@@ -422,6 +520,82 @@ def selling():
     lines.append("- 장인 설비(와인통, 저장용 병, 숙성용 나무통 등)로 가공하면 재료보다 비싸게 팔린다.")
     lines.append("어느 아이템이 어느 생산품인지는 아이템 정보의 '판매:' 줄에 적혀 있다.")
     return chunk("tip", "selling", "판매 가치 올리기 (배송 상자 판매가 높이기)", lines)
+
+
+XP_SOURCE_KO = {"kill_entity": "몹 처치", "eat_food": "음식 먹기", "craft_item": "제작", "increase_stat": "통계(행동 횟수)",
+                "mine_block": "블록 캐기", "fish_item": "낚시로 건지기"}
+XP_STAT_KO = {"minecraft.custom:minecraft.animals_bred": "동물 번식", "minecraft.custom:minecraft.open_chest": "상자 열기",
+              "minecraft.custom:lootr.looted_stat": "전리품 상자(구조물 상자) 처음 열기"}
+# KubeJS 스크립트의 추가 경험치: 파일 이름 -> 무엇을 할 때인지
+XP_SCRIPT_KO = {"animalBreeding": "가축 번식", "animalBase": "가축 돌보기(쓰다듬기·먹이·채집 등)", "havestHandling": "작물 수확",
+                "pamsTreeLoot": "과일나무 수확", "experienceBooks": "경험치 책 사용", "cornucopia": "풍요의 뿔 사용",
+                "globalBlockEntityHandlers": "장인 설비에서 생산품 꺼내기", "globalAnimalHandlers": "가축 관련 행동",
+                "globalFish": "물고기 연못에서 어란 수확", "espressoMachine": "에스프레소 머신", "prizeMachine": "경품 머신 보상",
+                "chargingRod": "피뢰침에서 배터리 꺼내기", "regretCrystals": "후회의 수정(경험치 되돌리기)"}
+
+
+def skill_xp():
+    """스킬마다 '경험치 얻는 법' 카드: puffish_skills 설정(experience.json)과 KubeJS 스크립트의 giveExperience.
+    ('탐험 경험치는 어떻게 빠르게 얻어?', 11/11 — 자료에 없었다)"""
+    base = config.SERVER_DIR / "kubejs" / "data"
+    lang = load_lang("society_skills")
+    out = []
+    script_xp = {}
+    for path in (config.SERVER_DIR / "kubejs").rglob("*.js"):
+        if "server_scripts" not in str(path) and "startup_scripts" not in str(path):
+            continue
+        for m in re.finditer(r'giveExperience\(\s*server\s*,\s*player\s*,\s*"([a-z_]+)"\s*,\s*([^,)]+(?:\([^)]*\))?[^,)]*)',
+                             path.read_text(encoding="utf-8", errors="replace")):
+            what = XP_SCRIPT_KO.get(path.stem, path.stem)
+            script_xp.setdefault(m.group(1), []).append(f"{what}: {m.group(2).strip()}")
+    for exp in sorted(base.glob("*/puffish_skills/categories/*/experience.json")):
+        cat = exp.parent.name
+        data = gamedata._load_json(exp.read_text(encoding="utf-8")) or {}
+        title = clean(lang.get(f"society_skills.{cat}.category.title", cat))
+        lines = [f"'{title}' 스킬 경험치를 얻는 방법:"]
+        for src in data.get("sources") or []:
+            kind = XP_SOURCE_KO.get(src.get("type", "").split(":")[-1], src.get("type", ""))
+            d = src.get("data") or {}
+            names = {}
+            for var, spec in (d.get("variables") or {}).items():
+                for op in spec.get("operations") or []:
+                    test = op.get("data") or {}
+                    target = test.get("item") or test.get("block") or test.get("entity_type") or test.get("stat")
+                    if target:
+                        target = target if ":" in target or target.startswith("#") else f"minecraft:{target}"
+                        names[var] = XP_STAT_KO.get(target) or (gamedata._tag_name(target[1:]) if target.startswith("#")
+                                                                else clean(gamedata.display_name(target)))
+                    if "nbt" in test and "silk_touch" in str(test["nbt"]):
+                        names[var] = "섬세한 손길 도구"
+            for rule in d.get("experience") or []:
+                cond = rule.get("condition", "")
+                for var in sorted(names, key=len, reverse=True):
+                    cond = re.sub(rf"!\s*{re.escape(var)}\b", f"{names[var]} 아님", cond)
+                    cond = re.sub(rf"\b{re.escape(var)}\b", names[var], cond)
+                cond = cond.replace("&", ", 그리고 ").replace("|", " 또는 ")
+                expr = rule.get("expression", "").replace("max_health", "몹 최대 체력")
+                lines.append(f"- {kind}: {re.sub(r'\s+', ' ', cond).strip() or '모두'} → 경험치 {expr}")
+            if (d.get("anti_farming") or {}).get("limit_per_chunk"):
+                lines.append(f"  (같은 청크에서 {d['anti_farming']['limit_per_chunk']}번까지만, 반복 사냥 제한)")
+        for line in script_xp.get(cat, []):
+            lines.append(f"- {line} (경험치)")
+        levels = ((data.get("experience_per_level") or {}).get("data") or {}).get("values")
+        if levels:
+            lines.append("레벨마다 필요한 경험치: " + ", ".join(f"{v:,}" for v in levels))
+        out += chunk("skill", f"xp.{cat}", f"스킬 경험치 얻는 법: {title}", lines)
+    return out
+
+
+def skill_items():
+    """스킬 트리를 스킬 하나씩 카드로('목축업자: 치즈 착제기 생산량 두 배'). 트리 전체 카드는 검색에 잘 안 걸렸다(11/11 '치즈나 우유 스킬')."""
+    out = []
+    for c in skills():
+        tree = c["title"].split(": ", 1)[-1].split(" (")[0]
+        for n, line in enumerate(c["text"].split("\n")):
+            name = line.split(":")[0].strip()
+            if ":" in line and name:
+                out += chunk("skill", f"{c['id']}.{n}", f"스킬: {name} ({tree})", [f"{tree} 스킬 트리의 '{name}'", line])
+    return out
 
 
 def skills():
@@ -640,6 +814,11 @@ def acquisition():
         add(item_id, f"판매: {line}")
     for item_id, line in gamedata.automation_io().items():
         add(item_id, f"자동화: {line}")
+    for item_id, lines in item_hints()[0].items():
+        for line in lines:
+            add(item_id, line)
+    for log, biomes in gamedata.tree_biomes().items():
+        add(log, "자연히 자라는 곳: " + tree_places(biomes))
     names = gamedata.names()
     for item_id, lines in gamedata.ore_generation().items():
         for line in lines:
@@ -744,7 +923,8 @@ def write_recipe_facts():
 def build():
     chunks, seen = [], set()
     # 위키는 맨 뒤에 둔다: 같은 이름에 서버 자료 조각이 있으면 그쪽이 먼저 확정 정보로 고정된다.
-    sources = [quests, patchouli, acquisition, mod_items, machines, enchantments, npcs, coins, society, skills, selling, ores, tips, server_facts, manual,
+    sources = [quests, patchouli, acquisition, mod_items, machines, enchantments, ponders, hint_cards, trees, npcs, coins, society, skills,
+               skill_items, skill_xp, selling, ores, tips, server_facts, manual,
                wiki_docs]
     for c in [c for source in sources for c in source()]:
         # 제목만 있는 퀘스트처럼 내용이 같은 조각은 하나만 남긴다. 이름이 다르면(수박 조각/수박씨) 따로 둔다.

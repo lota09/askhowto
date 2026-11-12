@@ -145,14 +145,29 @@ def search(question, extra_names=()):
     text = REF_WORDS_RE.sub(" ", question) if extra_names else question
     # 질문의 영어 낱말이 가리키는 한국어 이름도 더한다('enchant 하는 법' -> '마법 부여대').
     korean += index().english_terms(question)
+    # 조작키를 물으면 자료의 표현('K 키를 눌러')으로도 찾는다('스킬 찍는 단축키 뭐더라?', 11/11).
+    if KEYBIND_RE.search(question):
+        korean += ["키를 눌러", "키를 누르면"]
     query = " ".join([text, *extra_names] + korean + list(dict.fromkeys(english)))
     hits = index().search(query, k=config.SEARCH_K, names=korean)
+    # 질문이 자료 종류('스킬', '퀘스트')를 말하면 그 종류 안에서 따로 찾아 앞에 둔다. 스킬 카드 몇 개가 '치즈'가 든
+    # 수많은 다른 자료에 밀렸다('치즈나 우유와 관련된 스킬 전부 다 알려줘', 11/11).
+    for pattern, source in SOURCE_WORDS:
+        if re.search(pattern, question):
+            others = {c["source"] for c in index().chunks} - {source}
+            top = hits[0][0] if hits else 1.0
+            own = [(top, c) for _, c in index().search(query, k=SOURCE_HITS, names=korean, skip_sources=others)]
+            ids = {c["id"] for _, c in own}
+            hits = own + [h for h in hits if h[1]["id"] not in ids]
     # 1글자 단위 점수는 어떤 한국어 문장에나 조금씩 붙으므로 '게임 용어가 걸렸나' 판단에는 빼고 본다.
     # 위키는 영어 원문이라 영어가 섞인 일반 질문('I love you 번역해줘')도 높은 점수가 나온다. 판단에서는 뺀다.
     strong = index().search(query, k=1, unigram_weight=0, skip_sources=("wiki",))
     return pinned, extras, hits, (strong[0][0] if strong else 0)
 
 
+SOURCE_WORDS = [(r"스킬", "skill"), (r"퀘스트", "quest"), (r"농업\s*연감", "almanac"), (r"물고기\s*도감", "fish_finder")]
+SOURCE_HITS = 5
+KEYBIND_RE = re.compile(r"단축\s*키|핫\s*키|무슨\s*키|어떤\s*키|몇\s*번\s*키|키\s*(설정|배치|뭐)|조작\s*키|키보드")
 NOW_RE = re.compile(r"지금|현재|요즘|이번|오늘|여기|이곳|이\s*근처|이\s*바이옴")
 # 가리키는 말. '이거'는 눈앞(손에 든 아이템), '그거'는 앞서 말한 것(직전 대화)을 먼저 본다.
 NEAR_REF_RE = re.compile(r"이거|이것|이건|이걸|이게|요거|요게|이\s*(아이템|블록|템)")
@@ -160,9 +175,17 @@ FAR_REF_RE = re.compile(r"그거|그것|그건|그걸|그게|저거|저것|저�
 REF_WORDS_RE = re.compile(NEAR_REF_RE.pattern + "|" + FAR_REF_RE.pattern)
 
 
-def refer_note(referred):
-    """'이건 용도가 뭐야?'의 '이건'이 무엇인지 질문 바로 아래에 적는다. 없으면 모델이 이름 없이 답했다(11/04)."""
-    return f"\n(질문의 '이거/그거'는 {', '.join(referred)}을(를) 가리킨다)" if referred else ""
+def refer_note(referred, question=""):
+    """'이건 용도가 뭐야?'의 '이건'이 무엇인지 질문 바로 아래에 적는다. 없으면 모델이 이름 없이 답했다(11/04).
+    가리키는 말 없이 짧은 후속 질문으로 이은 것이면 단정하지 않는다."""
+    if not referred:
+        return ""
+    if NEAR_REF_RE.search(question) or FAR_REF_RE.search(question):
+        return f"\n(질문의 '이거/그거'는 {', '.join(referred)}을(를) 가리킨다)"
+    return f"\n(앞 대화의 대상: {', '.join(referred)}. 질문이 이것을 이어서 묻는 것일 수 있다)"
+
+
+SHORT_FOLLOWUP_CHARS = 12
 
 
 def referent_names(question, history, state):
@@ -177,6 +200,9 @@ def referent_names(question, history, state):
     if last and (rag.MAKE_INTENT_RE.search(question) or rag.USE_INTENT_RE.search(question)
                  or rag.FAMILY_INTENT_RE.search(question)):
         return last
+    # 이름 없는 짧은 후속 질문('기간이 어떻게돼?', '그냥 파는 용도임?')은 직전 대화의 대상을 이어서 묻는 것으로 본다(11/12).
+    if last and len(re.sub(r"\s+", "", question)) <= SHORT_FOLLOWUP_CHARS:
+        return last
     return []
 
 
@@ -185,6 +211,9 @@ def referent_names(question, history, state):
 COOLDOWN_SECONDS = 300
 COOLDOWN_KINDS = ("timeout", "limit", "busy", "server", "network")
 COOLDOWN = {}  # 서비스 이름 -> 건너뛰기가 끝나는 시각
+# 연달아 실패하면 건너뛰는 시간을 두 배씩 늘린다(최대 1시간). 11/09~11/13 NIM이 5분마다 다시 시도해 30초씩 버렸다.
+FAIL_STREAK = {}
+COOLDOWN_MAX_SECONDS = 3600
 
 
 def provider_chain(choice):
@@ -203,10 +232,13 @@ def provider_chain(choice):
 
 def note_result(provider, err=None):
     """서비스 결과를 건너뛰기 표에 반영한다."""
+    name = provider["name"]
     if err is None:
-        COOLDOWN.pop(provider["name"], None)
+        COOLDOWN.pop(name, None)
+        FAIL_STREAK.pop(name, None)
     elif err.kind in COOLDOWN_KINDS:
-        COOLDOWN[provider["name"]] = time.time() + COOLDOWN_SECONDS
+        FAIL_STREAK[name] = FAIL_STREAK.get(name, 0) + 1
+        COOLDOWN[name] = time.time() + min(COOLDOWN_SECONDS * 2 ** (FAIL_STREAK[name] - 1), COOLDOWN_MAX_SECONDS)
 
 
 def failure_notice(failures, used=None):
@@ -544,7 +576,7 @@ def answer_with(provider, question, pinned, extras, hits, strong, history=(), st
         hits = [(hits[0][0], c) for c in linked_chunks(pinned, hits, question)] + hits
     context = rag.build_context(pinned, hits, extras, budget=provider["context_chars"], cut=cut) or "(관련 자료 없음)"
     messages = with_history(ANSWER_SYSTEM + (TOOL_RULE if provider["tools"] else ""),
-                            f"{state_block(state, question)}[자료]\n{context}\n\n[질문]\n{question}" + refer_note(referred))
+                            f"{state_block(state, question)}[자료]\n{context}\n\n[질문]\n{question}" + refer_note(referred, question))
     pinned_ids = {c["id"] for c in pinned}
     used = pinned + [c for _, c in rag.relevant(hits, cut) if c["id"] not in pinned_ids]
     tool_log = []
